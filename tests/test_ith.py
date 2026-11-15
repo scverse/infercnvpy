@@ -53,6 +53,21 @@ def test_constant_cells_are_left_out():
         assert n_dropped == 5
 
 
+def test_sparse_matches_dense_with_duplicates_and_constant_rows():
+    """Duplicate CSR entries are summed, and constant rows are left out, as for a dense matrix."""
+    X = _cnv_like(300, np.random.default_rng(5))
+    X[:3] = 0.1  # constant, but not zero
+    C = sp.csr_matrix(X)
+    dup = sp.csr_matrix((np.repeat(C.data / 2, 2), np.repeat(C.indices, 2), C.indptr * 2), shape=C.shape)
+    for tile in (64, 10_000):
+        expected = corr_iqr(X, tile=tile)
+        assert expected[1] == 3
+        assert corr_iqr(C, tile=tile) == expected
+        assert corr_iqr(dup, tile=tile) == expected
+    sampled = [corr_iqr(m, n_pairs=5000, rng=np.random.default_rng(0)) for m in (X, C, dup)]
+    assert sampled[1] == sampled[2] == sampled[0]
+
+
 @pytest.mark.parametrize("n", [0, 1])
 def test_fewer_than_two_cells(n):
     assert np.isnan(_iqr(np.ones((n, 3)) * np.arange(3)))

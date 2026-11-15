@@ -34,7 +34,7 @@ TILE = 2048  # rows per block: a block of correlations is TILE x cells float32
 
 @njit_parallel
 def _standardize_dense(X, out):  # pragma: no cover
-    """Centre each row and scale it to unit norm; a constant row becomes NaN."""
+    """Centre each row and scale it to unit norm; a constant row becomes NaN. `out` may be `X`."""
     n, g = X.shape
     for i in prange(n):
         m = 0.0
@@ -49,26 +49,6 @@ def _standardize_dense(X, out):  # pragma: no cover
         inv = 1.0 / np.sqrt(ss) if ss > 0 else np.nan
         for c in range(g):
             out[i, c] *= inv
-
-
-@njit_parallel
-def _standardize_csr(indptr, indices, data, n_cols, out):  # pragma: no cover
-    """Like `_standardize_dense`, straight from CSR into a dense float32 row (no float64 densification)."""
-    n = len(indptr) - 1
-    for i in prange(n):
-        s = 0.0
-        q = 0.0
-        for k in range(indptr[i], indptr[i + 1]):
-            s += data[k]
-            q += data[k] * data[k]
-        m = s / n_cols
-        ss = q - s * m  # sum of squared deviations, implicit zeros included
-        inv = 1.0 / np.sqrt(ss) if ss > 0 else np.nan
-        fill = -m * inv
-        for c in range(n_cols):
-            out[i, c] = fill
-        for k in range(indptr[i], indptr[i + 1]):
-            out[i, indices[k]] = (data[k] - m) * inv
 
 
 @njit_parallel
@@ -141,7 +121,8 @@ def corr_iqr(
     Z = np.empty(X.shape, dtype=np.float32)
     if sp.issparse(X):
         X = sp.csr_matrix(X)
-        _standardize_csr(X.indptr, X.indices, X.data.astype(np.float32, copy=False), X.shape[1], Z)
+        X.astype(np.float32, copy=False).toarray(out=Z)  # sums duplicate entries
+        _standardize_dense(Z, Z)
     else:
         _standardize_dense(np.ascontiguousarray(X, dtype=np.float32), Z)
     keep = ~np.isnan(Z[:, 0]) if X.shape[1] else np.zeros(X.shape[0], dtype=bool)
