@@ -22,7 +22,7 @@ from mpl_toolkits.axes_grid1.axes_size import Fixed
 from infercnvpy._logging import SKIP_OWN_FRAMES
 from infercnvpy._numba import n_kernel_chunks, numba_threads
 from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column
-from infercnvpy.pl._heatmap_kernels import binned_sums, pixel_rows, sampled_rows
+from infercnvpy.pl._heatmap_kernels import binned_sums, column_ranges, gram, pixel_rows, sampled_rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -141,19 +141,19 @@ def chromosome_heatmap(
     cat = _categories(adata, groupby)
     palette = _group_colors(adata, groupby, len(cat.categories))
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`adata.obsm['X_{use_rep}']`", lazy=True)
-    dendro = None
+    dendro, var_range = None, None
     with numba_threads(n_jobs):
         if opts.dendrogram:
-            cat, palette, dendro = _order_by_dendrogram(
-                adata, groupby, cat, palette, lambda: _group_means(X, cat.codes.astype(np.int64), len(cat.categories))
-            )
+            cat, palette, dendro = _order_by_dendrogram(adata, groupby, cat, palette, lambda: _cell_dendrogram(X, cat))
         codes = cat.codes.astype(np.int64)
         order, bounds, rows = pixel_rows(codes, len(cat.categories), _n_pixel_rows(fig, ax, swap=opts.swap_axes))
         if aggregate == "sample":
             values, lo, hi = sampled_rows(X, order[(bounds[:-1] + bounds[1:]) // 2])
         else:
             values = binned_sums(X, order, bounds) / np.diff(bounds)[:, None]
-    values = opts.transform(values)
+        if opts.standard_scale == "var":
+            var_range = column_ranges(X)
+    values = opts.transform(values, var_range)
     if aggregate == "mean":
         lo, hi = np.nanmin(values), np.nanmax(values)
         center = 0 if opts.vcenter is None else opts.vcenter
@@ -244,7 +244,9 @@ def chromosome_heatmap_summary(
     if opts.dendrogram:
         present = np.flatnonzero(np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)))
         before = list(cat.categories[present])
-        cat, palette, dendro = _order_by_dendrogram(adata, groupby, cat, palette, lambda: means)
+        # as `mode="legacy"`: every group mean 10 times, the groups sorted as `astype("category")` sorts them
+        repeated = (np.repeat(means, 10, axis=0), pd.Categorical(np.repeat(before, 10)))
+        cat, palette, dendro = _order_by_dendrogram(adata, groupby, cat, palette, lambda: _scanpy_dendrogram(*repeated))
         means = means[[before.index(c) for c in cat.categories if c in before]]
     rows = (np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)) > 0).astype(np.int64)
     norm = opts.color_norm(float(np.min(means)), float(np.max(means)))
@@ -276,15 +278,22 @@ class _Options:
         kwargs.clear()
         return opts
 
-    def transform(self, values: np.ndarray) -> np.ndarray:
-        """`log` and `standard_scale` of the drawn rows, as :func:`scanpy.pl.heatmap` does for all cells."""
+    def transform(self, values: np.ndarray, var_range: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray:
+        """`log` and `standard_scale` of the drawn rows, as :func:`scanpy.pl.heatmap` does for all cells.
+
+        `var_range` is the minimum and maximum of each window over all cells; without it, `standard_scale="var"`
+        scales over the drawn rows.
+        """
         if self.log:
             values = np.log1p(values)
         if self.standard_scale is not None:
             axis = 0 if self.standard_scale == "var" else 1
-            values = values - np.nanmin(values, axis=axis, keepdims=True)
+            if self.standard_scale == "var" and var_range is not None:
+                lo, hi = (np.log1p(r) if self.log else r for r in var_range)
+            else:
+                lo, hi = np.nanmin(values, axis=axis, keepdims=True), np.nanmax(values, axis=axis, keepdims=True)
             with np.errstate(invalid="ignore", divide="ignore"):
-                values = np.nan_to_num(values / np.nanmax(values, axis=axis, keepdims=True), nan=0)
+                values = np.nan_to_num((values - lo) / (hi - lo), nan=0)
         return values
 
     def color_norm(self, lo: float, hi: float) -> Normalize:
@@ -424,35 +433,64 @@ def _group_means(X: Any, codes: np.ndarray, n_groups: int) -> np.ndarray:
 
 
 def _order_by_dendrogram(
-    adata: AnnData, groupby: str, cat: pd.Categorical, palette: list, means: Callable[[], np.ndarray]
+    adata: AnnData, groupby: str, cat: pd.Categorical, palette: list, compute: Callable[[], dict[str, Any]]
 ) -> tuple[pd.Categorical, list, dict[str, Any] | None]:
     """Reorder the categories (and their colours) as the leaves of the dendrogram of the non-empty groups.
 
     The dendrogram is `adata.uns[f"dendrogram_{groupby}"]` from :func:`scanpy.tl.dendrogram` if that has exactly
-    these groups, as for `mode="legacy"`, otherwise it is computed from the groups' mean CNV profiles (`means()`).
-    Unused categories go last. With fewer than two groups, there is no dendrogram.
+    these groups, as for `mode="legacy"`, otherwise `compute()`. Unused categories go last. With fewer than two
+    groups, there is no dendrogram.
     """
     present = np.flatnonzero(np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)))
     if len(present) < 2:
         return cat, palette, None
     labels = [str(c) for c in cat.categories[present]]
-    stored = adata.uns.get(f"dendrogram_{groupby}", {}).get("dendrogram_info")
-    if stored is not None and sorted(map(str, stored["ivl"])) == sorted(labels):
-        dendro = {**stored, "leaves": [labels.index(str(c)) for c in stored["ivl"]]}
-    else:
-        dendro = _dendrogram(means(), labels)
+    dendro = adata.uns.get(f"dendrogram_{groupby}", {}).get("dendrogram_info")
+    if dendro is None or sorted(map(str, dendro["ivl"])) != sorted(labels):
+        dendro = compute()
+    dendro = {**dendro, "leaves": [labels.index(str(c)) for c in dendro["ivl"]]}
     new = [*present[dendro["leaves"]], *np.setdiff1d(np.arange(len(cat.categories)), present)]
     return cat.reorder_categories(cat.categories[new]), [palette[i] for i in new], dendro
 
 
-def _dendrogram(means: np.ndarray, labels: list[str]) -> dict[str, Any]:
-    """`scipy.cluster.hierarchy.dendrogram` of the groups, computed like :func:`scanpy.tl.dendrogram`."""
-    import scipy.cluster.hierarchy as sch
-    from scipy.spatial import distance
+def _cell_dendrogram(X: Any, cat: pd.Categorical) -> dict[str, Any]:
+    """The dendrogram of the non-empty groups that :func:`scanpy.tl.dendrogram` computes from the cells (as legacy).
 
-    corr = np.clip(pd.DataFrame(means.T).corr().to_numpy(), -1, 1)
-    z = sch.linkage(distance.squareform(1 - corr, checks=False), method="complete")
-    return sch.dendrogram(z, labels=labels, no_plot=True)
+    With more windows than `scanpy.settings.N_PCS`, scanpy clusters the groups' means of a PCA of all cells, which
+    for a lazy matrix comes from the covariance of the windows (`_pca_group_means`). Otherwise, it clusters the
+    group means.
+    """
+    groups = cat.remove_unused_categories()
+    lazy = _is_dask(X) or _is_backed(X)
+    if X.shape[1] > sc.settings.N_PCS and not lazy:
+        return _scanpy_dendrogram(X, groups)
+    means = _group_means(X, cat.codes.astype(np.int64), len(cat.categories))
+    if X.shape[1] > sc.settings.N_PCS:
+        means = _pca_group_means(X, means)
+    return _scanpy_dendrogram(means, pd.Categorical(groups.categories, categories=groups.categories))
+
+
+def _scanpy_dendrogram(X: Any, groups: pd.Categorical) -> dict[str, Any]:
+    """`dendrogram_info` of :func:`scanpy.tl.dendrogram` with its defaults, of the rows of `X` grouped by `groups`."""
+    obs = pd.DataFrame({"group": groups}, index=np.arange(len(groups)).astype(str))
+    return sc.tl.dendrogram(AnnData(X, obs=obs), "group", inplace=False)["dendrogram_info"]
+
+
+def _pca_group_means(X: Any, means: np.ndarray) -> np.ndarray:
+    """The groups' means (`means`, in windows) in the cells' PCA of :func:`scanpy.pp.pca` with its defaults.
+
+    The PCA comes from the eigenvectors of the covariance, with the signs of :func:`sklearn.utils.extmath.svd_flip`.
+    """
+    import scipy.linalg
+
+    n, m = X.shape
+    n_comps = min(n, m) - 1 if min(n, m) <= sc.settings.N_PCS else sc.settings.N_PCS
+    G, sums = gram(X)
+    mu = sums / n
+    _, vecs = scipy.linalg.eigh((G - n * np.outer(mu, mu)) / (n - 1))
+    comps = vecs[:, ::-1][:, :n_comps].T
+    comps *= np.sign(comps[np.arange(n_comps), np.abs(comps).argmax(axis=1)])[:, None]
+    return (means - mu) @ comps.T
 
 
 # --- drawing --------------------------------------------------------------------------------------------------------

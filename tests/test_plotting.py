@@ -157,10 +157,56 @@ def test_dendrogram_from_mean_profiles(adata_small):
     tmp.obs["group"] = tmp.obs["group"].cat.remove_unused_categories()
     expected = sc.tl.dendrogram(tmp, "group", var_names=tmp.var_names, inplace=False)["categories_ordered"]
     assert [t.get_text() for t in axes["groupby_ax"].get_yticklabels()] == expected
+    # legacy clusters the group means in the order of their names, which can flip branches
+    tmp.obsm["X_cnv"], tmp.uns["cnv"] = tmp.X, adata_small.uns["cnv"]
+    legacy = cnv.pl.chromosome_heatmap_summary(tmp, groupby="group", dendrogram=True, show=False, mode="legacy")
+    expected = [t.get_text() for t in legacy["groupby_ax"].get_yticklabels()]
     summary = cnv.pl.chromosome_heatmap_summary(adata_small, groupby="group", dendrogram=True, show=False)
     assert [t.get_text() for t in summary["groupby_ax"].get_yticklabels()] == expected
     X, g = adata_small.obsm["X_cnv"].toarray(), adata_small.obs["group"]
     np.testing.assert_allclose(_image(summary), [X[(g == c).to_numpy()].mean(axis=0) for c in expected], rtol=1e-6)
+
+
+def _many_windows(seed: int) -> AnnData:
+    """400 cells in 8 groups x 300 windows: more windows than scanpy's `N_PCS`, so its dendrogram uses a PCA."""
+    rng = np.random.default_rng(seed)
+    profiles = rng.normal(size=(8, 300)) * (rng.random((8, 300)) < 0.3)
+    labels = rng.integers(0, 8, 400)
+    X = (profiles[labels] + rng.normal(scale=0.7, size=(400, 300))).astype(np.float32)
+    groups = pd.Categorical([f"G{i}" for i in labels], categories=[f"G{i}" for i in (3, 0, 6, 1, 7, 4, 2, 5)])
+    obs = pd.DataFrame({"g": groups}, index=[str(i) for i in range(400)])
+    adata = AnnData(obs=obs, uns={"cnv": {"chr_pos": {"chr1": 0, "chr2": 150}}})
+    adata.obsm["X_cnv"] = X
+    return adata
+
+
+@pytest.mark.parametrize("fmt", [np.asarray, sp.csr_matrix, _dask, lambda X: _dask(sp.csr_matrix(X), 50)])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@both_plots
+def test_dendrogram_like_legacy_with_many_windows(fmt, seed, plot):
+    legacy = plot(_many_windows(seed), groupby="g", dendrogram=True, show=False, mode="legacy")
+    expected = [t.get_text() for t in legacy["groupby_ax"].get_yticklabels()]
+    adata = _many_windows(seed)
+    adata.obsm["X_cnv"] = fmt(adata.obsm["X_cnv"])
+    fast = plot(adata, groupby="g", dendrogram=True, show=False)
+    assert [t.get_text() for t in fast["groupby_ax"].get_yticklabels()] == expected
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"log": True}, {"aggregate": "mean"}])
+def test_standard_scale_var_over_all_cells(adata_small, kwargs):
+    """Each window is scaled with its minimum and maximum over all cells, not only the drawn ones."""
+    if kwargs.get("log"):
+        adata_small.obsm["X_cnv"] *= 0.2  # log1p needs values above -1
+    axes = cnv.pl.chromosome_heatmap(
+        adata_small, groupby="group", figsize=(4, 0.2), standard_scale="var", show=False, **kwargs
+    )
+    values = _image(axes)
+    assert len(values) < 59
+    raw = _image(cnv.pl.chromosome_heatmap(adata_small, groupby="group", figsize=(4, 0.2), show=False, **kwargs))
+    X = adata_small.obsm["X_cnv"].toarray()
+    X = np.log1p(X) if kwargs.get("log") else X
+    lo, hi = X.min(axis=0), X.max(axis=0)
+    np.testing.assert_allclose(values, (raw - lo) / (hi - lo), rtol=1e-6, atol=1e-7)
 
 
 def test_legacy_stores_group_colors(adata_small):
