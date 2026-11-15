@@ -1,5 +1,6 @@
 """The numba kernels of `tl.infercnv` against a plain numpy implementation of the algorithm."""
 
+import math
 import threading
 
 import numba
@@ -288,7 +289,7 @@ def test_group_sums(dtype, expm1):
     want = np.zeros((2, 3, 40))
     for i, (r, g) in enumerate(zip(rows, groups, strict=True)):
         x = D[r].astype(np.float64)
-        want[i * 2 // rows.size, g] += np.expm1(x) if expm1 else x
+        want[i * 2 // rows.size, g] += [math.expm1(v) for v in x] if expm1 else x  # libm, as numba
     C = sp.csr_matrix(D)
     for kernel, X in ((_group_sums_csr, (C.data, C.indices, C.indptr)), (_group_sums_dense, (D,))):
         sums = np.zeros_like(want)
