@@ -108,6 +108,19 @@ def test_infercnv_records_params(adata_full_mock, tmp_path):
     assert sc.read_h5ad(tmp_path / "cnv.h5ad").uns["cnv"]["params"]["dynamic_threshold"] is None
 
 
+def test_infercnv_params_of_list_likes_are_writable(adata_full_mock, tmp_path):
+    cats = adata_full_mock.obs["sample"].astype("category").cat.categories[:1]
+    cnv.tl.infercnv(
+        adata_full_mock, reference_key="sample", reference_cat=cats, exclude_chromosomes={"chrY", "chrX"}, window_size=3
+    )
+    params = adata_full_mock.uns["cnv"]["params"]
+    assert params["reference_cat"] == ["sample1"]
+    assert params["exclude_chromosomes"] == ["chrX", "chrY"]
+    adata_full_mock.write_h5ad(tmp_path / "cnv.h5ad")
+    adata_full_mock.write_zarr(tmp_path / "cnv.zarr")
+    assert list(sc.read_h5ad(tmp_path / "cnv.h5ad").uns["cnv"]["params"]["exclude_chromosomes"]) == ["chrX", "chrY"]
+
+
 def test_infercnv_no_chr_prefix(adata_full_mock):
     """Chromosome names without a "chr" prefix (Ensembl style) give a clear error."""
     adata_full_mock.var["chromosome"] = adata_full_mock.var["chromosome"].str.removeprefix("chr")

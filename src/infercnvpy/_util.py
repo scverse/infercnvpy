@@ -70,8 +70,14 @@ def _choose_mtx_rep(adata, use_raw=False, layer=None):
 
 
 def _params_for_uns(**params) -> dict:
-    """Prepare call parameters for `adata.uns[...]["params"]`: store sequences as lists."""
-    return {k: list(v) if isinstance(v, tuple | list) else v for k, v in params.items()}
+    """Prepare call parameters for `adata.uns[...]["params"]`: store list-likes (e.g. a pandas Index) as lists."""
+
+    def writable(v):
+        if isinstance(v, str | dict) or not pd.api.types.is_list_like(v):
+            return v
+        return sorted(v) if isinstance(v, set | frozenset) else list(v)
+
+    return {k: writable(v) for k, v in params.items()}
 
 
 def _deprecated_positional[F: Callable[..., Any]](*names: str, until: str = "0.8.0") -> Callable[[F], F]:
