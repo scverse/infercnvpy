@@ -16,7 +16,7 @@ def _read_rdata_frame(path: Path, name: str) -> pd.DataFrame:
         import rdata  # imported here, so that `import infercnvpy` does not load it
     except ImportError:
         raise ImportError(
-            "read_scevan requires rdata as optional dependency. Please install it using `pip install infercnvpy[scevan]`."
+            'read_scevan needs the optional dependency rdata. Install it with `pip install "infercnvpy[scevan]"`.'
         ) from None
     obj = rdata.read_rda(path, default_encoding="utf-8")[name]
     if isinstance(obj, pd.DataFrame):
