@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -21,7 +21,8 @@ from mpl_toolkits.axes_grid1.axes_size import Fixed
 
 from infercnvpy._logging import SKIP_OWN_FRAMES
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column
+from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column, _splice_doc
+from infercnvpy.pl._chromosome_heatmap_legacy import legacy_heatmap, legacy_summary
 from infercnvpy.pl._heatmap_kernels import binned_sums, column_ranges, gram, pixel_rows, sampled_rows
 
 if TYPE_CHECKING:
@@ -43,13 +44,56 @@ _CBAR_MAX_H = 4.0
 #: Colour bar label: infercnv, smooth_cnv and SCEVAN all report CNV relative to the reference cells.
 CBAR_LABEL = "CNV (relative to reference)"
 
-#: :func:`scanpy.pl.heatmap` arguments that `mode="fast"` implements; any other one switches to `mode="legacy"`.
-FAST_KWARGS = frozenset(
-    {"swap_axes", "standard_scale", "var_group_rotation", "dendrogram", "vmin", "vmax", "vcenter", "norm"}
-    | {"show_gene_labels", "log"}
-)
+
+#: Docstring blocks shared by `chromosome_heatmap` and `chromosome_heatmap_summary`.
+_HEATMAP_DOC = {
+    "data": """
+        adata
+            annotated data matrix
+        groupby
+            group the cells by a categorical variable from adata.obs. It usually makes
+            sense to either group by unsupervised clustering obtained from
+            :func:`infercnvpy.tl.leiden` (the default) or a cell-type label.
+        use_rep
+            Key under which the result from :func:`infercnvpy.tl.infercnv` are stored. With `mode="fast"`,
+            `adata.obsm[f"X_{use_rep}"]` can also be a dask array or a backed matrix, which is read block by block.
+        cmap
+            colormap to use
+        figsize
+            (width, height) tuple in inches. Ignored if `ax` is given.
+    """,
+    "fast_args": """
+        `mode="fast"` implements the :func:`scanpy.pl.heatmap` arguments `swap_axes`, `standard_scale`,
+        `var_group_rotation`, `dendrogram`, `vmin`, `vmax`, `vcenter`, `norm`, `show_gene_labels` (ignored) and
+        `log`; with any other argument (or a numeric, not categorical, `groupby` column), it warns and uses
+        `mode="legacy"`, or raises an error if the CNV matrix is not in memory.
+    """,
+    "figure": """
+        ax
+            Draw the heatmap into this axes (`mode="fast"` only). The group colours, chromosome labels, dendrogram and
+            colour bar go into axes split off from it.
+        n_jobs
+            Number of threads for reading the CNV matrix (`mode="fast"`). `None` uses all cores.
+        show
+            Whether to show the figure. Defaults to :attr:`scanpy.settings.autoshow`.
+        save
+            If `True` or a `str`, save the figure to :attr:`scanpy.settings.figdir`. A string is appended to the default
+            filename `heatmap`; it sets the file type if it ends in `.pdf`, `.png` or `.svg`, otherwise
+            :attr:`scanpy.settings.file_format_figs` does.
+        return_fig
+            Return the :class:`~matplotlib.figure.Figure`.
+    """,
+    "returns": """
+        Returns
+        -------
+        The figure if `return_fig` is true. Otherwise, if `show` is false, a dictionary of axes with the keys
+        `heatmap_ax`, `groupby_ax` (group colours), `gene_groups_ax` (chromosome labels), `colorbar_ax` (not with
+        `mode="legacy"`) and, with `dendrogram`, `dendrogram_ax`.
+    """,
+}
 
 
+@_splice_doc(**_HEATMAP_DOC)
 def chromosome_heatmap(
     adata: AnnData,
     *,
@@ -79,45 +123,18 @@ def chromosome_heatmap(
 
     Parameters
     ----------
-    adata
-        annotated data matrix
-    groupby
-        group the cells by a categorical variable from adata.obs. It usually makes
-        sense to either group by unsupervised clustering obtained from
-        :func:`infercnvpy.tl.leiden` (the default) or a cell-type label.
-    use_rep
-        Key under which the result from :func:`infercnvpy.tl.infercnv` are stored. With `mode="fast"`,
-        `adata.obsm[f"X_{use_rep}"]` can also be a dask array or a backed matrix, which is read block by block.
-    cmap
-        colormap to use
-    figsize
-        (width, height) tuple in inches. Ignored if `ax` is given.
+    {data}
     mode
         `"fast"` draws the heatmap with infercnvpy at the resolution of the figure. `"legacy"` draws every cell
         with :func:`scanpy.pl.heatmap`, which needs the CNV matrix as a dense table and several times its memory.
-        `mode="fast"` implements the :func:`scanpy.pl.heatmap` arguments `swap_axes`, `standard_scale`,
-        `var_group_rotation`, `dendrogram`, `vmin`, `vmax`, `vcenter`, `norm`, `show_gene_labels` (ignored) and
-        `log`; with any other argument (or a numeric, not categorical, `groupby` column), it warns and uses
-        `mode="legacy"`, or raises an error if the CNV matrix is not in memory.
+        {fast_args}
     aggregate
         What a pixel row shows when there are more cells than pixel rows (`mode="fast"` only). `"sample"` shows the
         cell in the middle of the cells that fall into the row, as the full-resolution plot downscaled with
         nearest-neighbour interpolation, with the colour scale from the values of all cells. `"mean"` shows their
         mean, with the colour scale from the range of the drawn (averaged) values unless `vmin` and `vmax` are
         given.
-    ax
-        Draw the heatmap into this axes (`mode="fast"` only). The group colours, chromosome labels, dendrogram and
-        colour bar go into axes split off from it.
-    n_jobs
-        Number of threads for reading the CNV matrix (`mode="fast"`). `None` uses all cores.
-    show
-        Whether to show the figure. Defaults to :attr:`scanpy.settings.autoshow`.
-    save
-        If `True` or a `str`, save the figure to :attr:`scanpy.settings.figdir`. A string is appended to the default
-        filename `heatmap`; it sets the file type if it ends in `.pdf`, `.png` or `.svg`, otherwise
-        :attr:`scanpy.settings.file_format_figs` does.
-    return_fig
-        Return the :class:`~matplotlib.figure.Figure`.
+    {figure}
     **kwargs
         Arguments of :func:`scanpy.pl.heatmap`, see `mode`. By default, the colour scale is a
         :class:`~matplotlib.colors.TwoSlopeNorm` centred at `vcenter=0`, with limits from the data. Pass the same
@@ -127,16 +144,12 @@ def chromosome_heatmap(
         next to the heatmap. A dendrogram stored in `adata.uns[f"dendrogram_{groupby}"]` is used if it has the same
         groups; otherwise the computed one is stored there, as `mode="legacy"` does.
 
-    Returns
-    -------
-    The figure if `return_fig` is true. Otherwise, if `show` is false, a dictionary of axes with the keys
-    `heatmap_ax`, `groupby_ax` (group colours), `gene_groups_ax` (chromosome labels), `colorbar_ax` (not with
-    `mode="legacy"`) and, with `dendrogram`, `dendrogram_ax`.
+    {returns}
     """
     if aggregate not in ("sample", "mean"):
         raise ValueError(f"`aggregate` must be 'sample' or 'mean', got {aggregate!r}.")
     if _use_legacy("chromosome_heatmap", adata, groupby, use_rep, mode, kwargs):
-        return _legacy(_legacy_heatmap, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
+        return _legacy(legacy_heatmap, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
     opts = _Options.pop(kwargs)
     own = ax is None
     fig, ax = _figure(ax, figsize)
@@ -167,6 +180,7 @@ def chromosome_heatmap(
     return _finish(fig, axes, show=show, save=save, return_fig=return_fig, own=own)
 
 
+@_splice_doc(**_HEATMAP_DOC)
 def chromosome_heatmap_summary(
     adata: AnnData,
     *,
@@ -192,50 +206,20 @@ def chromosome_heatmap_summary(
 
     Parameters
     ----------
-    adata
-        annotated data matrix
-    groupby
-        group the cells by a categorical variable from adata.obs. It usually makes
-        sense to either group by unsupervised clustering obtained from
-        :func:`infercnvpy.tl.leiden` (the default) or a cell-type label.
-    use_rep
-        Key under which the result from :func:`infercnvpy.tl.infercnv` are stored. With `mode="fast"`,
-        `adata.obsm[f"X_{use_rep}"]` can also be a dask array or a backed matrix, which is read block by block.
-    cmap
-        colormap to use
-    figsize
-        (width, height) tuple in inches. Ignored if `ax` is given.
+    {data}
     mode
         `"fast"` computes the group means in one pass over the CNV matrix and draws them with infercnvpy.
-        `"legacy"` uses :func:`scanpy.pl.heatmap`. `mode="fast"` implements the :func:`scanpy.pl.heatmap` arguments
-        `swap_axes`, `standard_scale`, `var_group_rotation`, `dendrogram`, `vmin`, `vmax`, `vcenter`, `norm`,
-        `show_gene_labels` (ignored) and `log`; with any other argument (or a numeric, not categorical, `groupby`
-        column), it warns and uses `mode="legacy"`, or raises an error if the CNV matrix is not in memory.
-    ax
-        Draw the heatmap into this axes (`mode="fast"` only). The group colours, chromosome labels, dendrogram and
-        colour bar go into axes split off from it.
-    n_jobs
-        Number of threads for reading the CNV matrix (`mode="fast"`). `None` uses all cores.
-    show
-        Whether to show the figure. Defaults to :attr:`scanpy.settings.autoshow`.
-    save
-        If `True` or a `str`, save the figure to :attr:`scanpy.settings.figdir`. A string is appended to the default
-        filename `heatmap`; it sets the file type if it ends in `.pdf`, `.png` or `.svg`, otherwise
-        :attr:`scanpy.settings.file_format_figs` does.
-    return_fig
-        Return the :class:`~matplotlib.figure.Figure`.
+        `"legacy"` uses :func:`scanpy.pl.heatmap`.
+        {fast_args}
+    {figure}
     **kwargs
         Arguments of :func:`scanpy.pl.heatmap`, see `mode`. By default, the colour scale is a
         :class:`~matplotlib.colors.TwoSlopeNorm` centred at `vcenter=0` from the smallest to the largest group mean.
 
-    Returns
-    -------
-    The figure if `return_fig` is true. Otherwise, if `show` is false, a dictionary of axes with the keys
-    `heatmap_ax`, `groupby_ax` (group colours), `gene_groups_ax` (chromosome labels), `colorbar_ax` (not with
-    `mode="legacy"`) and, with `dendrogram`, `dendrogram_ax`.
+    {returns}
     """
     if _use_legacy("chromosome_heatmap_summary", adata, groupby, use_rep, mode, kwargs):
-        return _legacy(_legacy_summary, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
+        return _legacy(legacy_summary, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
     opts = _Options.pop(kwargs)
     own = ax is None
     fig, ax = _figure(ax, figsize)
@@ -314,6 +298,10 @@ class _Options:
         )
 
 
+#: :func:`scanpy.pl.heatmap` arguments that `mode="fast"` implements; any other one switches to `mode="legacy"`.
+FAST_KWARGS = frozenset(f.name for f in fields(_Options)) | {"show_gene_labels"}
+
+
 # --- mode selection -------------------------------------------------------------------------------------------------
 
 
@@ -375,18 +363,6 @@ def _legacy(
     fig = axes["heatmap_ax"].get_figure(root=True)
     assert fig is not None
     return _finish(fig, axes, show=show, save=save, return_fig=return_fig)
-
-
-def _legacy_heatmap(adata: AnnData, **kwargs) -> dict[str, Axes]:
-    from infercnvpy.pl._chromosome_heatmap_legacy import legacy_heatmap
-
-    return legacy_heatmap(adata, **kwargs)
-
-
-def _legacy_summary(adata: AnnData, **kwargs) -> dict[str, Axes]:
-    from infercnvpy.pl._chromosome_heatmap_legacy import legacy_summary
-
-    return legacy_summary(adata, **kwargs)
 
 
 # --- data -----------------------------------------------------------------------------------------------------------

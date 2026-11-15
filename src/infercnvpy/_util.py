@@ -1,8 +1,10 @@
 import inspect
+import re
 import sys
 import warnings
 from collections.abc import Callable
 from functools import wraps
+from textwrap import dedent, indent
 from typing import Any
 
 import numpy as np
@@ -86,6 +88,21 @@ def _params_for_uns(**params) -> dict:
         return sorted(v) if isinstance(v, set | frozenset) else list(v)
 
     return {k: writable(v) for k, v in params.items()}
+
+
+def _splice_doc[F: Callable[..., Any]](**blocks: str) -> Callable[[F], F]:
+    """Replace each line `{name}` of the docstring by the text `blocks[name]`, at the indentation of that line."""
+
+    def decorate(fn: F) -> F:
+        doc = fn.__doc__ or ""
+        for name, block in blocks.items():
+            match = re.search(rf"^( *)\{{{name}\}}$", doc, flags=re.MULTILINE)
+            assert match is not None, f"{fn.__name__} has no line {{{name}}}"
+            doc = doc.replace(match.group(0), indent(dedent(block).strip("\n"), match.group(1)))
+        fn.__doc__ = doc
+        return fn
+
+    return decorate
 
 
 def _deprecated_positional[F: Callable[..., Any]](*names: str, until: str = "0.8.0") -> Callable[[F], F]:
