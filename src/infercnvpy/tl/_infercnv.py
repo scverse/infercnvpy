@@ -15,7 +15,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _params_for_uns
+from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column, _params_for_uns
 from infercnvpy.tl._infercnv_kernels import (
     _cnv_csr,
     _cnv_dense,
@@ -301,12 +301,6 @@ def _natural_sort(l: Sequence):
         return [convert(c) for c in re.split("([0-9]+)", key)]
 
     return sorted(l, key=alphanum_key)
-
-
-def _obs_column(adata: AnnData, key: str) -> pd.Series:
-    """`adata.obs[key]` as a pandas Series (the `obs` of `anndata.experimental.read_lazy` holds xarray arrays)."""
-    column = adata.obs[key]
-    return column if isinstance(column, pd.Series) else pd.Series(np.asarray(column))
 
 
 def _categories(reference_cat: str | Sequence[str]) -> np.ndarray:

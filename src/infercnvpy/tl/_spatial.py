@@ -20,7 +20,7 @@ from anndata import AnnData
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import njit, njit_parallel, numba_threads, prange
-from infercnvpy._util import _as_matrix, _params_for_uns
+from infercnvpy._util import _as_matrix, _obs_column, _params_for_uns
 
 
 @njit
@@ -333,7 +333,7 @@ def spatial_regions(
     if beta < 0:
         raise ValueError(f"`beta` must be non-negative, got {beta}.")
     key_added = f"{key}_spatial" if key_added is None else key_added
-    labels_in = adata.obs[key].astype("category")
+    labels_in = _obs_column(adata, key).astype("category")
     categories = labels_in.cat.categories
     labels = labels_in.cat.codes.to_numpy().astype(np.int64)
     k = len(categories)

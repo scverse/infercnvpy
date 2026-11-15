@@ -11,12 +11,12 @@ from anndata import AnnData
 from infercnvpy._logging import SKIP_OWN_FRAMES, log, log_result
 from infercnvpy._numba import numba_threads
 from infercnvpy._util import (
-    _as_df,
     _as_matrix,
     _choose_mtx_rep,
     _deprecated_positional,
     _is_backed,
     _is_dask,
+    _obs_column,
     _params_for_uns,
 )
 
@@ -87,7 +87,7 @@ def cnv_score(
     if groupby not in adata.obs.columns and groupby == "cnv_leiden":
         raise ValueError("`cnv_leiden` not found in `adata.obs`. Did you run `tl.leiden`?")
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`obsm['X_{use_rep}']`", lazy=True)
-    groups = _as_df(adata.obs)[groupby]
+    groups = _obs_column(adata, groupby)
     if _is_dask(X) or _is_backed(X):
         cluster_score = _abs_group_means(X, groups)
     else:
@@ -95,7 +95,7 @@ def cnv_score(
     log_result("cnv_score", "scored %d groups of %r", len(cluster_score), groupby)
 
     if inplace:
-        score_array = np.array([cluster_score[c] for c in adata.obs[groupby]])
+        score_array = np.array([cluster_score[c] for c in groups])
         adata.obs[key_added] = score_array
         adata.uns[key_added] = {"params": _params_for_uns(groupby=groupby, use_rep=use_rep)}
         return None
@@ -338,7 +338,7 @@ def _ith(
     exclude_self_pairs: bool,
 ):
     """IQR of the cell-cell correlations of the rows of `X` within each group of `adata.obs[groupby]`."""
-    codes = adata.obs[groupby].astype("category").cat
+    codes = _obs_column(adata, groupby).astype("category").cat
     with numba_threads(n_jobs):
         rng = np.random.default_rng(random_state)
         sizes = np.bincount(codes.codes[codes.codes >= 0], minlength=len(codes.categories))
