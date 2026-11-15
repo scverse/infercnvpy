@@ -51,14 +51,27 @@ the infercnvpy equivalents operate on CNV data.
 .. currentmodule:: infercnvpy
 ```
 
-### InferCNV
+### Copy number inference
 
 ```{eval-rst}
 .. autosummary::
     :toctree: generated
 
     tl.infercnv
+    tl.copy_number
 ```
+
+Which function to use:
+
+- {func}`~infercnvpy.tl.infercnv` computes a continuous CNV signal (smoothed expression relative to a reference).
+  Use it to explore that signal, for results comparable to the R inferCNV package, and for small gene panels. It
+  needs reference (normal) cells.
+- {func}`~infercnvpy.tl.copy_number` calls copy number. It returns calibrated tumour and normal labels, clones and
+  segments, from raw counts, with or without reference cells. Use it for droplet and imaging UMI data, not for
+  Smart-seq2. Providing reference cells improves the detection of small clones on dense panels.
+
+Both write their profiles to `adata.obsm` and `adata.uns` in the same layout, so the plots, scores, embeddings and
+spatial tools below accept the output of either (`use_rep="cnv"` or `use_rep="copy_number"`).
 
 ### CNV scores
 
