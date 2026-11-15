@@ -48,7 +48,7 @@ def test_constant_cells_are_left_out():
     with_zero_rows = np.vstack([X, np.zeros((5, X.shape[1]))])
     assert np.isnan(_numpy_iqr(with_zero_rows))  # numpy propagates the undefined correlation
     for tile in (64, 10_000):
-        iqr, n_dropped = corr_iqr(with_zero_rows, tile=tile)
+        iqr, n_dropped, _ = corr_iqr(with_zero_rows, tile=tile)
         assert iqr == pytest.approx(_numpy_iqr(X), abs=1e-5)
         assert n_dropped == 5
 
