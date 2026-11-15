@@ -121,9 +121,11 @@ def chromosome_heatmap(
     **kwargs
         Arguments of :func:`scanpy.pl.heatmap`, see `mode`. By default, the colour scale is a
         :class:`~matplotlib.colors.TwoSlopeNorm` centred at `vcenter=0`, with limits from the data. Pass the same
-        `vmin` and `vmax` to compare figures across modes, representations or datasets. `dendrogram=True` orders the groups by
-        hierarchical clustering of their mean CNV profiles (Pearson correlation, complete linkage, as
-        :func:`scanpy.tl.dendrogram`) and draws the dendrogram next to the heatmap.
+        `vmin` and `vmax` to compare figures across modes, representations or datasets. `dendrogram=True` orders the
+        groups as :func:`scanpy.tl.dendrogram` with its defaults clusters them (as `mode="legacy"`; with more windows
+        than `scanpy.settings.N_PCS`, it clusters the groups' means of a PCA of all cells) and draws the dendrogram
+        next to the heatmap. A dendrogram stored in `adata.uns[f"dendrogram_{groupby}"]` is used if it has the same
+        groups.
 
     Returns
     -------
