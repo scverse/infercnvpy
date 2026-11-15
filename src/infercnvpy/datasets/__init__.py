@@ -23,7 +23,7 @@ def _load_h5ad(entry: DatasetEntry, target: Path, download: DownloadCB, /, **kwa
 
 
 def _fetch(name: str) -> AnnData:
-    cache_dir = os.environ.get(DATASET_ENV_VAR)
+    cache_dir: str | Path | None = os.environ.get(DATASET_ENV_VAR)
     if not cache_dir:
         (file,) = _DATASETS[name].files
         old = Path(sc.settings.datasetdir)  # where infercnvpy 0.6 downloaded maynard2020_3k

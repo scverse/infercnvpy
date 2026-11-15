@@ -63,7 +63,7 @@ def njit(fn: Callable[..., Any], /, **options: Any) -> Any:
     """`numba.njit` with ``nogil=True``, numpy's error model and the disk cache of `_KeyedCacheFile`."""
     dispatcher = numba.njit(fn, nogil=True, error_model="numpy", **options)
     if hasattr(dispatcher, "py_func"):  # with NUMBA_DISABLE_JIT=1, `njit` returns `fn` itself
-        dispatcher._cache = _KeyedFunctionCache(dispatcher.py_func)  # what `cache=True` sets
+        dispatcher._cache = _KeyedFunctionCache(dispatcher.py_func)  # type: ignore[attr-defined]  # what `cache=True` sets
     return dispatcher
 
 
