@@ -66,7 +66,7 @@ Which function to use:
 - {func}`~infercnvpy.tl.infercnv` computes a continuous CNV signal (smoothed expression relative to a reference).
   Use it to explore that signal, for results comparable to the R inferCNV package, and for small gene panels. It
   needs reference (normal) cells.
-- {func}`~infercnvpy.tl.copy_number` calls copy number. It returns calibrated tumour and normal labels, clones and
+- {func}`~infercnvpy.tl.copy_number` calls copy number. It returns calibrated aneuploid and diploid labels, clones and
   segments, from raw counts, with or without reference cells. Use it for droplet and imaging UMI data, not for
   Smart-seq2. Providing reference cells improves the detection of small clones on dense panels. On imaging data,
   `connectivity_key` smooths its posteriors over a spatial neighbour graph, like {func}`~infercnvpy.tl.smooth_cnv`

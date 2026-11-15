@@ -35,14 +35,13 @@ def _t_logpdf(y, m, v, nu):
 
 
 @njit_parallel
-def hmm_posteriors(Y, V, stay, means, log_prior, nu, post_mean, post_neutral, state, loglik):
+def hmm_posteriors(Y, V, stay, means, log_prior, nu, post_mean, post_neutral, state):
     """Forward-backward of a copy number HMM on each row of `Y` (profiles x genes, genomic order).
 
     Emissions are Student t with `nu` degrees of freedom, location `means[s]` and scale `V[p, i]` (variance). Between
     gene `i - 1` and gene `i` the chain keeps its state with probability `stay[i]`, and otherwise draws a new state from
     the prior (`exp(log_prior)`); `stay[i] = 0` starts a chromosome. Writes the posterior mean of the state means, the
-    posterior probability of the neutral state (`means == 0`), the most probable state per gene and the log
-    likelihood of each profile.
+    posterior probability of the neutral state (`means == 0`) and the most probable state per gene.
     """
     P, G = Y.shape
     S = means.shape[0]
@@ -56,7 +55,6 @@ def hmm_posteriors(Y, V, stay, means, log_prior, nu, post_mean, post_neutral, st
         alpha = np.empty((G, S))
         beta = np.empty(S)
         c = np.empty(G)
-        ll = 0.0
         for i in range(G):
             mx = -np.inf
             for s in range(S):
@@ -64,7 +62,6 @@ def hmm_posteriors(Y, V, stay, means, log_prior, nu, post_mean, post_neutral, st
                 mx = max(mx, emis[i, s])
             for s in range(S):
                 emis[i, s] = math.exp(emis[i, s] - mx)
-            ll += mx
             q = stay[i]
             tot = 0.0
             if i > 0:
@@ -76,10 +73,8 @@ def hmm_posteriors(Y, V, stay, means, log_prior, nu, post_mean, post_neutral, st
                 alpha[i, s] = emis[i, s] * pred
                 norm += alpha[i, s]
             c[i] = norm
-            ll += math.log(norm)
             for s in range(S):
                 alpha[i, s] /= norm
-        loglik[p] = ll
         # backward pass with the same scaling; gamma = alpha * beta
         for s in range(S):
             beta[s] = 1.0
@@ -113,25 +108,6 @@ def hmm_posteriors(Y, V, stay, means, log_prior, nu, post_mean, post_neutral, st
 
 
 @njit_parallel
-def nb_loglik(Y, size, mu, phi, out):
-    """Negative binomial log likelihood (up to terms that do not depend on the clone) of each cell under each clone.
-
-    `Y` is cells x windows (counts), `size` the size factor of each cell, `mu` clones x windows (expected share of the
-    cell's counts in each window, rows summing to 1) and `phi` the dispersion of each window (variance `m + m^2 /
-    phi`). Writes `out[cell, clone]`.
-    """
-    n, W = Y.shape
-    K = mu.shape[0]
-    for r in prange(n):
-        for k in range(K):
-            acc = 0.0
-            for w in range(W):
-                m = size[r] * mu[k, w]
-                acc += Y[r, w] * math.log(m) - (Y[r, w] + phi[w]) * math.log(m + phi[w])
-            out[r, k] = acc
-
-
-@njit_parallel
 def pooled_counts(data, indices, indptr, rws, col_map, labels, out, det):
     """Add the counts of each cell (row) to the row of its label: `out[chunk, label, gene]`, one slab per chunk.
 
@@ -158,11 +134,12 @@ def _spillover(y, a, g, use):
     """Spillover fraction of one cell.
 
     The fraction `s` in [0, 1] of a cell's counts `y` that maximises the Poisson likelihood of the window shares
-    `(1 - s) a + s g` (`a`: the cell's own diploid shares, `g`: the pooled shares of aneuploid cells). Concave in `s`:
-    a few Newton steps from 0.
+    `(1 - s) a + s g` (`a`: the cell's own diploid shares, `g`: the pooled shares of aneuploid cells). The likelihood
+    is concave in `s`, so its derivative has at most one root: Newton steps kept inside a bracket that bisection
+    narrows when a step leaves it.
     """
-    s = 0.0
-    for _ in range(8):
+    lo, hi, s = 0.0, 1.0, 0.0
+    for it in range(60):
         f1, f2 = 0.0, 0.0
         for w in range(len(y)):
             if use[w] and y[w] > 0:
@@ -170,19 +147,23 @@ def _spillover(y, a, g, use):
                 q = a[w] + s * d
                 f1 += y[w] * d / q
                 f2 -= y[w] * d * d / (q * q)
-        if s <= 0.0 and f1 <= 0.0:
+        if it == 0 and f1 <= 0.0:
             return 0.0
-        if f2 >= 0.0:
-            break
-        new = min(1.0, max(0.0, s - f1 / f2))
-        if abs(new - s) < 1e-4:
+        if f1 > 0.0:
+            lo = s
+        else:
+            hi = s
+        new = s - f1 / f2 if f2 < 0.0 else -1.0
+        if not lo < new < hi:
+            new = 0.5 * (lo + hi)
+        if abs(new - s) < 1e-6 or hi - lo < 1e-6:
             return new
         s = new
     return s
 
 
 @njit
-def _cell_loglik(y, size, t, share, phi, use, g, spill_ok, smax, report, out_row):
+def _cell_loglik(y, size, t, share, log_share, phi, use, g, spill_ok, smax, report, out_row):
     """Log likelihoods of one cell under each clone; returns the cell's spillover fraction (0 if not estimated).
 
     For a cell of a type with `spill_ok`, the diploid expectation (clone 0) mixes its own shares with the shares of
@@ -192,38 +173,42 @@ def _cell_loglik(y, size, t, share, phi, use, g, spill_ok, smax, report, out_row
     K, W = share.shape[1], share.shape[2]
     s_raw = _spillover(y, share[t, 0], g, use) if (spill_ok[t] or report) else 0.0
     s = min(s_raw, smax) if spill_ok[t] else 0.0
+    log_size = math.log(size)
     for k in range(K):
+        mixed = k == 0 and s > 0.0
         acc = 0.0
         for w in range(W):
             if use[w]:
                 p = share[t, k, w]
-                if k == 0 and s > 0.0:
+                if mixed:
                     p = (1.0 - s) * p + s * g[w]
-                m = size * p
-                acc += y[w] * math.log(m) - (y[w] + phi[w]) * math.log(m + phi[w])
+                if y[w] > 0:
+                    acc += y[w] * (log_size + (math.log(p) if mixed else log_share[t, k, w]))
+                acc -= (y[w] + phi[w]) * math.log(size * p + phi[w])
         out_row[k] = acc
     return s_raw
 
 
 @njit_parallel
-def nb_loglik_types(Y, size, types, share, phi, use, g, spill_ok, smax, report, out, spill):
-    """Negative binomial log likelihood of each cell under each clone, with the expected shares of the cell's type.
+def nb_loglik_types(Y, size, types, share, log_share, phi, use, g, spill_ok, smax, report, out, spill):
+    """Negative binomial log likelihood (up to terms that do not depend on the clone) of each cell under each clone.
 
-    `share` is types x clones x windows (rows summing to 1 over the used windows), `use` marks the windows that count
-    (`size` is each cell's count in them), the rest as in `nb_loglik`. Cells of types with `spill_ok` have a diploid
-    expectation that mixes in the shares `g` of the aneuploid cells (see `_cell_loglik`); `spill` receives each cell's
-    spillover fraction.
+    `Y` is cells x windows (counts) and `size` each cell's count in the windows marked by `use`. `share` (and its
+    logarithm `log_share`) is types x clones x windows, the expected share of the cell's counts in each window (summing
+    to 1 over the used windows), and `phi` the dispersion of each window (variance `m + m^2 / phi`). Writes
+    `out[cell, clone]`. Cells of types with `spill_ok` have a diploid expectation that mixes in the shares `g` of the
+    aneuploid cells (see `_cell_loglik`); `spill` receives each cell's spillover fraction.
     """
     n = Y.shape[0]
     for r in prange(n):
-        spill[r] = _cell_loglik(Y[r], size[r], types[r], share, phi, use, g, spill_ok, smax, report, out[r])
+        spill[r] = _cell_loglik(Y[r], size[r], types[r], share, log_share, phi, use, g, spill_ok, smax, report, out[r])
 
 
 @njit_parallel
 def nb_moments(Y, size, types, assign, share, use, num, den):
     """Per window, sums of `(y - m)^2 - m` and `m^2` over cells (`m` from the cell's type and clone).
 
-    for the method-of-moments dispersion; one slab per chunk of cells (`num`, `den`: chunks x windows).
+    They give the method-of-moments dispersion; one slab per chunk of cells (`num`, `den`: chunks x windows).
     """
     n, W = Y.shape
     n_chunks = num.shape[0]
@@ -241,10 +226,9 @@ def nb_moments(Y, size, types, assign, share, use, num, den):
 
 @njit_parallel
 def row_stats(data, indices, indptr, row0, min_genes, ndet, det):
-    """Detected genes of each cell (`ndet`).
+    """Detected genes of each cell (`ndet`), and per input column the cells that detect it (`det`).
 
-    and per input column the number of cells with at least `min_genes` detected genes in which it is detected
-    (`det`: chunks x columns, one slab per chunk of cells).
+    `det` counts only the cells with at least `min_genes` detected genes (chunks x columns, one slab per chunk).
     """
     n_rows = ndet.shape[0]
     n_chunks = det.shape[0]
@@ -267,7 +251,7 @@ def row_stats(data, indices, indptr, row0, min_genes, ndet, det):
 def project_rows(data, indices, indptr, rws, col_map, hvg_of_gene, loadings, out, n_chunks):
     """`out[r] = sum over the cell's highly variable genes of log1p(1e4 x count / size) x loadings[hvg]`.
 
-    with `size` the cell's count over the used genes (`col_map >= 0`).
+    `size` is the cell's count over the used genes (`col_map >= 0`).
     """
     n_rows, P = out.shape
     step = (n_rows + n_chunks - 1) // n_chunks
@@ -300,22 +284,21 @@ def assign_loglik(
     gene_win,
     types,
     share,
+    log_share,
     phi,
     use,
     g,
     spill_ok,
     smax,
-    report,
     out,
-    size,
     spill,
     n_chunks,
 ):
     """Negative binomial log likelihood of each cell under each clone, straight from the CSR counts.
 
     The cell's counts are summed per window of genes in a scratch row (one per chunk of cells), so no cells x windows
-    matrix is stored. `size` receives each cell's count in the used windows, `spill` its spillover fraction (as in
-    `nb_loglik_types`).
+    matrix is stored. `spill` receives each cell's spillover fraction, estimated for every cell (as in
+    `nb_loglik_types` with `report`).
     """
     n_rows = out.shape[0]
     W = share.shape[2]
@@ -333,9 +316,9 @@ def assign_loglik(
             for w in range(W):
                 if use[w]:
                     s += buf[w]
-            s = max(s, 1e-3)
-            size[r] = s
-            spill[r] = _cell_loglik(buf, s, types[r], share, phi, use, g, spill_ok, smax, report, out[r])
+            spill[r] = _cell_loglik(
+                buf, max(s, 1e-3), types[r], share, log_share, phi, use, g, spill_ok, smax, True, out[r]
+            )
 
 
 @njit_parallel
