@@ -58,7 +58,6 @@ the infercnvpy equivalents operate on CNV data.
     :toctree: generated
 
     tl.infercnv
-    tl.copykat
 ```
 
 ### CNV scores
