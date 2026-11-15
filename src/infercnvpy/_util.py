@@ -16,8 +16,10 @@ def _as_matrix(x, what: str = "the expression matrix", *, lazy: bool = False):
     """Narrow an AnnData array to an in-memory numpy array or scipy sparse matrix.
 
     With `lazy`, also accept a dask array or a backed (on-disk) matrix, see `_is_dask` and `_is_backed`. Without it,
-    such a matrix raises an error that tells the user how to load it.
+    such a matrix raises an error that tells the user how to load it. A DataFrame (as obsm allows) gives its values.
     """
+    if isinstance(x, pd.DataFrame):
+        return x.to_numpy()
     if isinstance(x, np.ndarray) or sp.issparse(x) or (lazy and (_is_dask(x) or _is_backed(x))):
         return x
     if _is_dask(x) or _is_backed(x):

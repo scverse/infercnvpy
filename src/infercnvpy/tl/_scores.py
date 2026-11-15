@@ -267,7 +267,7 @@ def ithcna(
         The number of cells left out is logged per group.
         `groupby` is keyword-only; passing it positionally still works with a :class:`FutureWarning`
         until 0.8.0. `use_rep` is the suffix of the key in `adata.obsm`, `"cnv"` for
-        `adata.obsm["X_cnv"]`, as in the other functions; the full key (`"X_cnv"`) still works with a
+        `adata.obsm["X_cnv"]`, as in the other functions; a full key of `adata.obsm` (e.g. `"X_cnv"`) still works with a
         :class:`FutureWarning` until 0.8.0.
 
     .. versionadded:: 0.7.0
@@ -311,10 +311,13 @@ def ithcna(
         Score of the group each cell belongs to, `NaN` for single-cell groups.
     """
     key = f"X_{use_rep}"
-    if key not in adata.obsm and use_rep.startswith("X_") and use_rep in adata.obsm:
+    if key not in adata.obsm and use_rep in adata.obsm:
+        suffix = f"pass `use_rep={use_rep.removeprefix('X_')!r}`"
+        if not use_rep.startswith("X_"):
+            suffix = f"store the matrix as `adata.obsm[{key!r}]`"
         warnings.warn(
             f"`use_rep={use_rep!r}` is the full key; ithcna now takes the suffix, as the other functions, and "
-            f"the full key will stop working in infercnvpy 0.8.0. Pass `use_rep={use_rep.removeprefix('X_')!r}`.",
+            f"the full key will stop working in infercnvpy 0.8.0. To use `adata.obsm[{use_rep!r}]`, {suffix}.",
             FutureWarning,
             skip_file_prefixes=SKIP_OWN_FRAMES,
         )

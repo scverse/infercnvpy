@@ -133,6 +133,8 @@ def genomic_position_from_gtf(
             'genomic_position_from_gtf needs the optional dependency gtfparse. Install it with `pip install "infercnvpy[gtf]"`.'
         ) from None
     gtf = gtfparse.read_gtf(gtf_file, usecols=["seqname", "feature", "start", "end", "gene_id", "gene_name"])
+    if hasattr(gtf, "to_pandas"):  # gtfparse 2 returns a polars DataFrame
+        gtf = gtf.to_pandas()
     gtf = (
         gtf.loc[
             gtf["feature"] == "gene",
