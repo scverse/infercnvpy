@@ -610,7 +610,7 @@ class _Rows:
 
     In memory and backed, blocks have `chunksize` rows; a dask array keeps its own blocks. `rows_of` reads the blocks
     ahead in threads (dask: with the synchronous scheduler) and yields them on this thread, so the kernels can use all
-    numba threads.
+    numba threads. A backed CSC matrix is read into memory as CSR first: each row block of it would read all of it.
     """
 
     def __init__(self, X, chunksize: int):
@@ -621,6 +621,15 @@ class _Rows:
                 X = X.rechunk({1: -1})
             sizes = list(X.chunks[0])
         else:
+            if _is_backed(X) and getattr(X, "format", None) == "csc":
+                warnings.warn(
+                    "The backed matrix is stored as CSC, so reading a block of its rows reads all of it. infercnvpy "
+                    "reads it into memory once, as CSR. To read it block by block, store it as CSR, e.g. with "
+                    "`adata.X = adata.X.tocsr()` before `adata.write_h5ad`.",
+                    UserWarning,
+                    skip_file_prefixes=SKIP_OWN_FRAMES,
+                )
+                X = X.to_memory()
             self.kind = "backed" if _is_backed(X) else "in memory"
             if self.kind == "in memory":
                 X = _kernel_ready(X)

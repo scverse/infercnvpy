@@ -96,6 +96,28 @@ def test_backed_h5ad(base, expected, tmp_path, fmt):
     assert isinstance(a.obsm["X_cnv"], sp.csr_matrix)
 
 
+def test_backed_csc_is_read_once(base, expected, tmp_path, monkeypatch):
+    """A row block of a backed CSC matrix would read all of it: the matrix is read into memory once instead."""
+    import h5py
+
+    path = tmp_path / "a.h5ad"
+    _with_X(base, sp.csc_matrix(base.X)).write_h5ad(path)
+    a = ad.read_h5ad(path, backed="r")
+    read = []
+    getitem = h5py.Dataset.__getitem__
+
+    def counting(self, *args, **kwargs):
+        res = getitem(self, *args, **kwargs)
+        if self.name == "/X/data":
+            read.append(np.size(res))
+        return res
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", counting)
+    with pytest.warns(UserWarning, match="CSC"):
+        _check(a, expected, chunksize=60)
+    assert sum(read) == a.X.group["data"].shape[0]
+
+
 @pytest.mark.parametrize("dynamic_threshold", [None, 1.5])
 def test_reads_each_block_once_per_pass(base, expected, dynamic_threshold):
     """Reference means and the noise band (blocks with reference cells), and the result: one read of a block each."""

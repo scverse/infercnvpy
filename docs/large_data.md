@@ -9,7 +9,9 @@ as a dense array. The expression matrix can be
 - a [dask](https://www.dask.org/) array, also with sparse `scipy` blocks, e.g. a matrix loaded lazily with
   {func}`anndata.experimental.read_elem_lazy` or {func}`anndata.experimental.read_lazy`, or a table from
   [spatialdata-io](https://spatialdata.scverse.org/projects/io/),
-- the matrix of a backed AnnData (`anndata.read_h5ad(..., backed="r")`).
+- the matrix of a backed AnnData (`anndata.read_h5ad(..., backed="r")`), stored as CSR or dense. Reading a block
+  of rows of a CSC matrix reads all of it, so a backed CSC matrix is read into memory once, as CSR, with a warning.
+  Convert it before writing the file (`adata.X = adata.X.tocsr()`) to read it block by block.
 
 Install the optional dependency with `pip install "infercnvpy[dask]"` to use dask arrays.
 
