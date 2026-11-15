@@ -518,8 +518,10 @@ def _to_csr(windows: np.ndarray, counts: np.ndarray, band: tuple[float, float]) 
     return builder.finish()
 
 
-def _gene_values_of(plan: _Plan, out: np.ndarray, band: tuple[float, float]) -> np.ndarray:
-    gv = np.full((out.shape[0], plan.layout.n_vars), np.nan, dtype=np.float32)
+def _gene_values_of(plan: _Plan, out: np.ndarray, band: tuple[float, float], gv: np.ndarray | None = None):
+    """Gene values of the centered windows `out` into `gv` (NaN-filled; default: a new array), see `_gene_values`."""
+    if gv is None:
+        gv = np.full((out.shape[0], plan.layout.n_vars), np.nan, dtype=np.float32)
     n_chunks = n_kernel_chunks(out.shape[0])
     _gene_values(out, *plan.layout.gene_geometry, *band, gv, n_chunks)
     return gv
@@ -549,7 +551,7 @@ def _run(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_values
             band = _noise_band(plan, rowstats if band_rows is None else rowstats[band_rows])
             _count_kept(windows, *band, counts)
         if gv is not None:
-            gv[builder.n : builder.n + len(rows)] = _gene_values_of(plan, windows, band)
+            _gene_values_of(plan, windows, band, gv[builder.n : builder.n + len(rows)])
         builder.add(windows, counts, band)
     assert band is not None
     return builder.finish(), gv, band
