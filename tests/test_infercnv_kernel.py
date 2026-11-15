@@ -154,11 +154,6 @@ def test_median(n):
         assert _median(values, np.empty(n)) == np.median(values)
 
 
-@pytest.fixture(scope="module")
-def oligo():
-    return cnv.datasets.oligodendroglioma()
-
-
 REF = {"reference_key": "cell_type", "reference_cat": ["Microglia/Macrophage", "Oligodendrocytes (non-malignant)"]}
 
 
