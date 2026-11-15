@@ -102,6 +102,45 @@ def test_copy_number_synthetic(kw):
     assert np.abs(np.nanmean(X[~tumour], axis=0)).max() < 0.05
 
 
+@pytest.mark.parametrize(
+    "kw",
+    [
+        # the tumour is the majority: its losses fell below the detection filter, so the tumour looked flattest
+        {"n_tumour": 600, "n_normal": 200, "depth": 400, "normal_depth": 1.0, "seed": 4},
+        {"n_tumour": 600, "n_normal": 600, "depth": 400, "seed": 2},  # the same, through the flattest-clone reseed
+        {"n_tumour": 600, "n_normal": 9},  # a rare normal population was too small to seed the baseline
+    ],
+)
+def test_copy_number_baseline_not_on_the_tumour(kw):
+    adata = _simulate(**kw)
+    obs = cnv.tl.copy_number(adata, n_jobs=2, inplace=False, force_calls=True)[0]
+    tumour = (adata.obs["truth"] == "tumour").to_numpy()
+    assert ((obs["copy_number"] == "aneuploid").to_numpy() == tumour).mean() >= 0.95
+
+
+def test_seed_genes_per_cluster_and_markers():
+    """Seeding genes: detected in enough cells of any one cluster (not only overall), and the markers."""
+    from infercnvpy.tl._infercnv import _Rows
+
+    adata = _simulate(n_tumour=385, n_normal=15)
+    normal = (adata.obs["truth"] == "normal").to_numpy()
+    X = adata.X.tolil()
+    X[:, 0] = 0  # a marker that no cell expresses
+    X[:, 1] = normal[:, None].astype(np.float32)  # detected only in the normal cells, under 5% of all cells
+    adata.X = X.tocsr()
+    source = _Rows(adata.X, 5000)
+    cells, lay, var, candidates = M._filter_cells_genes(
+        adata, source, M._excluded_genes(adata.var_names, None), ("chrY",), 200, 0.05
+    )
+    is_marker = np.zeros(adata.n_vars, dtype=bool)
+    is_marker[0] = True
+    data = M._Data(source, cells, lay, 10)
+    lay_seed, Yc = M._seed_genes(data, normal[cells].astype(np.int64), var, candidates, is_marker, 0.05)
+    assert lay.col_map[0] < 0 and lay.col_map[1] < 0
+    assert lay_seed.col_map[0] >= 0 and lay_seed.col_map[1] >= 0
+    assert Yc.shape == (2, lay_seed.n_genes)
+
+
 def test_copy_number_small_panel_keeps_labels():
     """On a ~1,000-gene panel (45 genes per chromosome) the genomic statistics still have blocks to compare.
 
@@ -146,7 +185,7 @@ def test_smooth_amplitude_ignores_noise():
     from infercnvpy.tl._infercnv import _Rows
 
     excluded = M._excluded_genes(adata.var_names, None)
-    _, lay = M._filter_cells_genes(adata, _Rows(adata.X, 5000), excluded, ("chrY",), 200, 0.05)
+    lay = M._filter_cells_genes(adata, _Rows(adata.X, 5000), excluded, ("chrY",), 200, 0.05)[1]
     rng = np.random.default_rng(0)
     noise = rng.normal(0, 0.5, lay.n_genes)
     step = np.where(np.arange(lay.n_genes) < lay.n_genes // 2, 0.3, -0.3)
@@ -169,11 +208,15 @@ def test_count_kernels_match_scipy():
     np.testing.assert_allclose(out, np.stack([Xk[:, win_of_col == w].sum(1) for w in range(6)], axis=1))
     labels = rng.integers(0, 3, 20)
     slabs = np.zeros((4, 3, 30))
-    K.pooled_counts(X.data, X.indices, X.indptr, np.arange(10, 30), col_map, labels, slabs)
-    ref = np.zeros((3, 30))
+    det = np.zeros_like(slabs)
+    K.pooled_counts(X.data, X.indices, X.indptr, np.arange(10, 30), col_map, labels, slabs, det)
+    ref, det_ref = np.zeros((3, 30)), np.zeros((3, 30))
     for lab in range(3):
-        ref[lab, col_map[col_map >= 0]] = X[10:30][labels == lab].toarray()[:, col_map >= 0].sum(0)
+        Xl = X[10:30][labels == lab].toarray()[:, col_map >= 0]
+        ref[lab, col_map[col_map >= 0]] = Xl.sum(0)
+        det_ref[lab, col_map[col_map >= 0]] = (Xl > 0).sum(0)
     np.testing.assert_allclose(slabs.sum(0), ref)
+    np.testing.assert_allclose(det.sum(0), det_ref)
     # the per-type likelihood equals the plain one per type
     Y = rng.poisson(5, (20, 6)).astype(float)
     size = Y.sum(1)

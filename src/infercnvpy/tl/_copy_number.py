@@ -83,7 +83,8 @@ _FLAT_GAP = 0.15  # difference of the cluster means of group flatness that count
 _MARKER_FOLD = 5.0
 _MARKER_MIN = 1e-3  # share of counts in the markers above which a group can be marker-rich
 _MAX_SPILL = 0.5  # largest spillover fraction of tumour transcripts in a normal cell's diploid expectation
-_MIN_SEED = 10  # cells of the smallest group that can be the first diploid group
+_MIN_SEED = 3  # cells of the smallest group that can be the first diploid group (a rare normal population)
+_MIN_RESEED = 10  # cells of the smallest clone that can become the diploid clone later
 _MIN_SEG_GENES = 20  # genes of the shortest run that counts towards the burden; fewer on small panels
 _MIN_EFFECT = 0.1  # smallest posterior mean log ratio that counts as a copy number change
 _MIN_PANEL_GENES = 1000  # genes passing the filters below which the calls are undetermined (small panels)
@@ -309,7 +310,9 @@ def copy_number(
         source = _Rows(expr, chunksize)
         start = log.debug("copy_number: %d cells x %d genes", adata.n_obs, adata.n_vars)
         tm = _Timer()
-        cells, lay = _filter_cells_genes(adata, source, excluded, exclude_chromosomes, min_genes, min_detection)
+        cells, lay, var, candidates = _filter_cells_genes(
+            adata, source, excluded, exclude_chromosomes, min_genes, min_detection
+        )
         tm("filter")
         n = len(cells)
         fit = (
@@ -346,9 +349,10 @@ def copy_number(
                 raise ValueError(f"No cell passing the filters has `{reference_key}` in {reference_cat!r}.")
             baseline_method = "reference"
         else:
-            markers = _marker_list(normal_markers)
-            is_marker = np.isin(np.asarray(adata.var_names)[lay.order], markers)
-            normal, baseline_method = _seed(Yc, groups, gcell, lay, is_marker)
+            is_marker_var = np.asarray(adata.var_names.isin(_marker_list(normal_markers)))
+            lay_seed, Yc_seed = _seed_genes(data, clusters, var, candidates, is_marker_var, min_detection)
+            is_marker = is_marker_var[lay_seed.order]
+            normal, baseline_method = _seed(Yc_seed, groups, gcell, lay_seed, is_marker)
 
         # clones start from the groups: those of the baseline cells form the diploid clone 0. After a pass, a
         # clearly flatter clone becomes diploid and the passes restart from it (not if markers chose the baseline).
@@ -356,7 +360,7 @@ def copy_number(
         # diploid clone, and the diploid clone defines the baseline
         em = _EM(data, hmm, gene_var, min_burden, clusters, Yc, Sc)
         if baseline_method != "reference" and normal_markers is not None:
-            em.normal_type = _marker_types(Yc, lay, is_marker)
+            em.normal_type = _marker_types(Yc_seed, lay_seed, is_marker)
             log.debug("copy_number: marker-rich expression types %s", np.flatnonzero(em.normal_type))
         em.tm = tm
         frac = np.bincount(gcell, weights=normal, minlength=n_groups) / np.bincount(gcell, minlength=n_groups)
@@ -370,10 +374,12 @@ def copy_number(
             k = int(assign.max()) + 1
             target = np.arange(k)
             if not fixed and not reseeded:
-                Yk = data.pooled(assign, k)[0]
+                Yk = data.pooled(assign, k, lay_seed)[0]
                 sizes = np.bincount(assign, minlength=k)
-                flat = np.array([_flatness(y, lay) for y in Yk])
-                flat[sizes < min(_MIN_SEED, int(sizes.max()))] = np.inf
+                flat = np.array([_flatness(y, lay_seed) for y in Yk])
+                small = sizes < min(_MIN_RESEED, int(sizes.max()))
+                small[0] = False  # the diploid clone itself may be a rare normal population
+                flat[small] = np.inf
                 seed = int(np.argmin(flat))
                 log.debug("copy_number: pass %d, clone flatness %s", pass_, np.round(flat, 3))
                 if flat[seed] < flat[0] - _RESEED_GAP:
@@ -562,39 +568,63 @@ def _row_blocks(source: _Rows, rows: np.ndarray):
 
 
 def _filter_cells_genes(adata, source, excluded, exclude_chromosomes, min_genes, min_detection):
-    """Cells with at least `min_genes` detected genes.
+    """Cells and genes that pass the filters, in one pass over the counts.
 
-    and the layout of the genes detected in at least `min_detection` of them (on chromosomes named like "chr1", not
-    excluded): one numba pass over the counts.
+    Cells have at least `min_genes` detected genes; genes are detected in at least `min_detection` of these cells.
+    Genes count if they are placed (chromosome and start) on a chromosome named like "chr1" and not excluded; these
+    candidates and the gene positions (a missing end is the start, as in `tl.infercnv`) are returned too.
     """
-    var = adata.var[["chromosome", "start", "end"]]
-    var = var.to_memory() if hasattr(var, "to_memory") else var
+    var = pd.DataFrame({c: np.asarray(adata.var[c]) for c in ("chromosome", "start", "end")}, index=adata.var_names)
+    var["end"] = var["end"].fillna(var["start"])
     chrom = var["chromosome"].astype(object)
-    named = chrom.notna() & chrom.astype(str).str.startswith("chr") & (chrom != "chrM")
+    named = chrom.notna() & var["start"].notna() & chrom.astype(str).str.startswith("chr") & (chrom != "chrM")
     if not named.any():
         raise ValueError(
             'None of the chromosome names in `adata.var["chromosome"]` start with "chr". '
             'infercnvpy only uses chromosomes named like "chr1".'
         )
     if exclude_chromosomes is not None:
-        named &= ~chrom.isin(list(exclude_chromosomes))
-    n_chunks = min(numba.get_num_threads(), 16)
-    det = np.zeros((n_chunks, adata.n_vars), dtype=np.int64)
+        named &= ~chrom.isin(_as_list(exclude_chromosomes))
+    candidates = named.to_numpy() & ~excluded
+    det = np.zeros((min(numba.get_num_threads(), 16), adata.n_vars), dtype=np.int64)
     ndet = []
     for X, rws in source.rows_of(None):  # all rows: each block's rows are contiguous
-        X = _csr(X)
-        nd = np.empty(len(rws), dtype=np.int64)
-        K.row_stats(X.data, X.indices, X.indptr, int(rws[0]), min_genes, nd, det)
-        ndet.append(nd)
+        if len(rws):
+            X = _csr(X)
+            nd = np.empty(len(rws), dtype=np.int64)
+            K.row_stats(X.data, X.indices, X.indptr, int(rws[0]), min_genes, nd, det)
+            ndet.append(nd)
     cells = np.flatnonzero(np.concatenate(ndet) >= min_genes)
     if len(cells) < 2:
         raise ValueError(f"Fewer than 2 cells have at least {min_genes} detected genes.")
-    used = (det.sum(axis=0) / len(cells) >= min_detection) & named.to_numpy() & ~excluded
+    used = (det.sum(axis=0) / len(cells) >= min_detection) & candidates
     if not used.any():
         raise ValueError("No gene passes the filters.")
     lay = _Layout(var, used)
     log.debug("copy_number: %d of %d cells and %d genes pass the filters", len(cells), adata.n_obs, lay.n_genes)
-    return cells, lay
+    return cells, lay, var, candidates
+
+
+def _seed_genes(data, clusters, var, candidates, is_marker, min_detection):
+    """Layout and pooled cluster counts of the genes that the baseline seed scores.
+
+    These are the genes detected in at least `min_detection` of the cells of any expression cluster, and the marker
+    genes. The model's genes are detected in `min_detection` of all cells: where a tumour is the majority, its losses
+    fall below that threshold more often than its gains, and the genes left tilt the genomic flatness of every group
+    towards the tumour. Per cluster, a gene lost in the tumour is still detected in the normal cells.
+    """
+    lay_c = _Layout(var, candidates)
+    Yc, _, det = data.pooled(clusters, lay=lay_c, detected=True)
+    rate = det / np.bincount(clusters)[:, None]
+    keep = (rate >= min_detection).any(axis=0) | is_marker[lay_c.order]
+    used = np.zeros(len(var), dtype=bool)
+    used[lay_c.order[keep]] = True
+    return _Layout(var, used), Yc[:, keep]
+
+
+def _as_list(x) -> list:
+    """A string as a list of one, any other collection as a list."""
+    return [x] if isinstance(x, str) else list(x)
 
 
 class _Timer:
@@ -645,14 +675,20 @@ class _Data:
             yield i0, i0 + len(rws), _csr(X)[rws][:, self.lay.order].astype(np.float64)
             i0 += len(rws)
 
-    def pooled(self, labels: np.ndarray, k: int | None = None):
-        """Pooled gene counts (k x genes) and pooled size factors of the cells with each label."""
+    def pooled(self, labels: np.ndarray, k: int | None = None, lay=None, detected: bool = False):
+        """Pooled gene counts (k x genes of `lay`, default: the model's) and pooled size factors of each label.
+
+        With `detected`, also the number of cells of each label in which each gene is detected.
+        """
+        lay = self.lay if lay is None else lay
         k = int(labels.max()) + 1 if k is None else k
         labels = np.ascontiguousarray(labels, dtype=np.int64)
-        slabs = np.zeros((min(numba.get_num_threads(), 16), k, self.lay.n_genes))
+        slabs = np.zeros((min(numba.get_num_threads(), 16), k, lay.n_genes))
+        det = np.zeros_like(slabs) if detected else np.zeros((0, 0, 0))
         for i0, i1, X, rws in _row_blocks(self.source, self.cells):
-            K.pooled_counts(X.data, X.indices, X.indptr, rws, self.lay.col_map, labels[i0:i1], slabs)
-        return slabs.sum(axis=0), np.bincount(labels, weights=self.size, minlength=k)
+            K.pooled_counts(X.data, X.indices, X.indptr, rws, lay.col_map, labels[i0:i1], slabs, det)
+        out = slabs.sum(axis=0), np.bincount(labels, weights=self.size, minlength=k)
+        return (*out, det.sum(axis=0)) if detected else out
 
     def expression_pcs(self, rng) -> np.ndarray:
         """First principal components of log-normalised expression of the most variable genes."""
