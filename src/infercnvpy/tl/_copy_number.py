@@ -105,6 +105,8 @@ def copy_number(
     n_iter: int = 10,
     calculate_gene_values: bool = False,
     max_fit_cells: int | None = None,
+    connectivity_key: str | None = None,
+    n_hops: int = 1,
     bin_size: int = 1_000_000,
     chunksize: int = 5000,
     random_state: int = 0,
@@ -186,6 +188,16 @@ def copy_number(
         cells with it in one pass over the counts. Faster and leaner for very large datasets; results can differ from
         the default, which fits on all cells. Use tens of thousands of cells: with a few thousand or fewer, the
         diploid baseline and the clones can change from those of the full fit.
+    connectivity_key
+        Smooth the results over a spatial neighbour graph, the cells x cells graph `adata.obsp[connectivity_key]`
+        (e.g. `"spatial_connectivities"` from :func:`squidpy.gr.spatial_neighbors_knn`), as
+        :func:`~infercnvpy.tl.smooth_cnv` does for a CNV matrix. Each cell's posterior clone probabilities and llr
+        become the mean over the cell and its neighbours (weighted by the graph); labels, clones and profiles follow
+        from the smoothed posteriors with the same rules. On imaging data, where single cells hold few counts and
+        neighbours usually share their clone, this recovers clone profiles much better, at the cost of blurring the
+        boundary between clones by about `n_hops` neighbours. Default `None`: no smoothing.
+    n_hops
+        Number of smoothing steps over the graph of `connectivity_key`; each step reaches one more edge away.
     calculate_gene_values
         Also store the copy number log ratio of every gene (cells x genes) in
         `adata.layers["gene_values_{key_added}"]`, as :func:`~infercnvpy.tl.infercnv` does. Gene values come from the
@@ -266,7 +278,14 @@ def copy_number(
         exclude_chromosomes=exclude_chromosomes, exclude_genes=exclude_genes, min_genes=min_genes,
         min_detection=min_detection, window_size=window_size, n_clusters=n_clusters, segment_length=segment_length,
         min_burden=min_burden, normal_markers=normal_markers, n_iter=n_iter, max_fit_cells=max_fit_cells, bin_size=bin_size, random_state=random_state,
+        **({} if connectivity_key is None else {"connectivity_key": connectivity_key, "n_hops": n_hops}),
     )  # fmt: skip
+    if n_hops < 1:
+        raise ValueError(f"`n_hops` must be at least 1, got {n_hops}.")
+    if connectivity_key is not None:
+        from infercnvpy.tl._spatial import _graph
+
+        _graph(adata, connectivity_key)  # before the fit: fails early on a missing or distance graph
     rng = np.random.default_rng(random_state)
     expr = _as_matrix(adata.X if layer is None else adata.layers[layer], lazy=True)
     excluded = _excluded_genes(adata.var_names, exclude_genes)
@@ -364,6 +383,10 @@ def copy_number(
             resp, llr = em.assign_all(source, cells, pcs_all, pcs, clusters)
             assign = np.argmax(resp, axis=1)
             tm("assign all cells")
+        if connectivity_key is not None:
+            resp, llr, linked = _smooth_over_graph(adata, connectivity_key, n_hops, cells, resp, llr)
+            assign = np.where(linked, np.argmax(resp, axis=1), assign)
+            tm("spatial smoothing")
         p_an = resp[:, ~dip].sum(axis=1)
         bins, chr_pos, M = lay.bins(np.arange(lay.n_genes), bin_size)
         cna = np.empty((adata.n_obs, len(bins)), dtype=np.float32)  # every row is written below
@@ -443,6 +466,27 @@ def copy_number(
         adata.layers[f"gene_values_{key_added}"] = gene_values
     adata.uns[key_added] = uns
     return None
+
+
+def _smooth_over_graph(adata, connectivity_key, n_hops, cells, resp, llr):
+    """Posteriors and llr averaged over each cell and its neighbours in `obsp[connectivity_key]`.
+
+    Uses the kernel of `tl.smooth_cnv`, on the graph between the cells that pass the filters. Also returns which cells
+    have neighbours (the others keep their values).
+    """
+    from infercnvpy.tl._spatial import _graph, _hop_dense
+
+    G = _graph(adata, connectivity_key)
+    if G.shape != (adata.n_obs, adata.n_obs):
+        raise ValueError(f"`adata.obsp[{connectivity_key!r}]` has shape {G.shape}, expected {(adata.n_obs,) * 2}.")
+    G = G[cells][:, cells].tocsr()
+    graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), -1.0)
+    X = np.column_stack([resp, llr]).astype(np.float64)
+    out = np.empty_like(X)
+    for _ in range(n_hops):
+        _hop_dense(*graph, X, out)
+        X, out = out, X
+    return X[:, :-1].astype(resp.dtype), X[:, -1].astype(np.float64), np.diff(G.indptr) > 0
 
 
 def _row_blocks(source: _Rows, rows: np.ndarray):

@@ -204,3 +204,41 @@ def test_count_kernels_match_scipy():
         mix = ((1 - s[r]) * share[types[r], 0] + s[r] * g)[None]
         K.nb_loglik(Y[r : r + 1], size[r : r + 1], mix, phi, ref_ll)
         np.testing.assert_allclose(ll2[r, 0], ref_ll[0, 0])
+
+
+def _knn_graph(xy, k):
+    from scipy.spatial import cKDTree
+
+    _, nb = cKDTree(xy).query(xy, k + 1)
+    n = len(xy)
+    return sp.csr_matrix((np.ones(n * k), (np.repeat(np.arange(n), k), nb[:, 1:].ravel())), shape=(n, n))
+
+
+def test_copy_number_spatial_smoothing():
+    """Tumour cells in one half of the tissue at low depth: smoothing the posteriors over 10 neighbours calls them
+    better, labels follow the smoothed posterior, and a graph without edges changes nothing."""
+    adata = _simulate(n_tumour=600, n_normal=600, depth=130, seed=3)
+    rng = np.random.default_rng(0)
+    tumour = (adata.obs["truth"] == "tumour").to_numpy()
+    xy = rng.random((adata.n_obs, 2))
+    xy[:, 0] = np.where(tumour, xy[:, 0] * 0.5, 0.5 + xy[:, 0] * 0.5)
+    adata.obsp["spatial_connectivities"] = _knn_graph(xy, 10)
+    adata.obsp["empty_connectivities"] = sp.csr_matrix((adata.n_obs, adata.n_obs))
+    kw = {"min_genes": 5, "n_jobs": 2, "inplace": False}
+    plain = cnv.tl.copy_number(adata, **kw)
+    smooth = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", **kw)
+    same = cnv.tl.copy_number(adata, connectivity_key="empty_connectivities", **kw)
+
+    def acc(obs):
+        return ((obs["copy_number"] == "aneuploid").to_numpy() == tumour).mean()
+
+    assert acc(smooth[0]) > max(acc(plain[0]), 0.98)
+    assert ((smooth[0]["copy_number_score"] > 0.5) == (smooth[0]["copy_number"] == "aneuploid")).all()
+    pd.testing.assert_frame_equal(plain[0], same[0])
+    np.testing.assert_allclose(plain[1], same[1], rtol=1e-6)
+    assert smooth[2]["params"]["connectivity_key"] == "spatial_connectivities"
+    assert "connectivity_key" not in plain[2]["params"]
+    with pytest.raises(ValueError, match="n_hops"):
+        cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", n_hops=0)
+    with pytest.raises(KeyError, match="not found"):
+        cnv.tl.copy_number(adata, connectivity_key="missing")

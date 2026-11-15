@@ -68,7 +68,9 @@ Which function to use:
   needs reference (normal) cells.
 - {func}`~infercnvpy.tl.copy_number` calls copy number. It returns calibrated tumour and normal labels, clones and
   segments, from raw counts, with or without reference cells. Use it for droplet and imaging UMI data, not for
-  Smart-seq2. Providing reference cells improves the detection of small clones on dense panels.
+  Smart-seq2. Providing reference cells improves the detection of small clones on dense panels. On imaging data,
+  `connectivity_key` smooths its posteriors over a spatial neighbour graph, like {func}`~infercnvpy.tl.smooth_cnv`
+  does for a CNV matrix.
 
 Both write their profiles to `adata.obsm` and `adata.uns` in the same layout, so the plots, scores, embeddings and
 spatial tools below accept the output of either (`use_rep="cnv"` or `use_rep="copy_number"`).
