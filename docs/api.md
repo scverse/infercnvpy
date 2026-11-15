@@ -73,6 +73,8 @@ Which function to use:
   with a weight estimated from the data. With fewer than 1,000 usable genes (small panels such as Xenium 480) or a
   median below 150 counts per cell, it labels the cells `"undetermined"` instead of calling them; use `tl.infercnv`
   there.
+- {func}`~infercnvpy.tl.detectability` doesn't infer copy number. Run it before an experiment, on a gene list, or
+  afterwards, on the data, to see which chromosome arms the panel and depth can resolve, and in how many cells.
 
 Both write their profiles to `adata.obsm` and `adata.uns` in the same layout, so the plots, scores, embeddings and
 spatial tools below accept the output of either (`use_rep="cnv"` or `use_rep="copy_number"`).
@@ -86,6 +88,19 @@ spatial tools below accept the output of either (`use_rep="cnv"` or `use_rep="co
     tl.cnv_score
     tl.ithcna
     tl.ithgex
+```
+
+### Detectability
+
+Which copy number changes a gene panel and depth can detect, per chromosome arm and in how many cells.
+Use it before an experiment, with a gene list and expression from a similar dataset, to choose a panel and depth,
+or afterwards, on the data, to see which arms the CNV calls can be trusted on.
+
+```{eval-rst}
+.. autosummary::
+    :toctree: generated
+
+    tl.detectability
 ```
 
 ### Spatial
@@ -136,6 +151,15 @@ e.g. `obsp["spatial_connectivities"]` from {func}`squidpy.gr.spatial_neighbors_k
 
     pl.chromosome_heatmap
     pl.chromosome_heatmap_summary
+```
+
+### Detectability
+
+```{eval-rst}
+.. autosummary::
+    :toctree: generated
+
+    pl.detectability
 ```
 
 ### Spatial
