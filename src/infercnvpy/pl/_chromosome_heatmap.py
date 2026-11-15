@@ -136,6 +136,7 @@ def chromosome_heatmap(
     if _use_legacy("chromosome_heatmap", adata, groupby, use_rep, mode, kwargs):
         return _legacy(_legacy_heatmap, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
     opts = _Options.pop(kwargs)
+    own = ax is None
     fig, ax = _figure(ax, figsize)
     cat = _categories(adata, groupby)
     palette = _group_colors(adata, groupby, len(cat.categories))
@@ -159,7 +160,7 @@ def chromosome_heatmap(
         lo, hi = min(lo, center - 1e-9), max(hi, center + 1e-9)  # TwoSlopeNorm needs vmin < vcenter < vmax
     norm = opts.color_norm(lo, hi)
     axes = _draw(fig, ax, adata, groupby, cat, palette, values, rows, dendro, use_rep, norm, cmap, opts)
-    return _finish(fig, axes, show=show, save=save, return_fig=return_fig)
+    return _finish(fig, axes, show=show, save=save, return_fig=return_fig, own=own)
 
 
 def chromosome_heatmap_summary(
@@ -232,6 +233,7 @@ def chromosome_heatmap_summary(
     if _use_legacy("chromosome_heatmap_summary", adata, groupby, use_rep, mode, kwargs):
         return _legacy(_legacy_summary, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
     opts = _Options.pop(kwargs)
+    own = ax is None
     fig, ax = _figure(ax, figsize)
     cat = _categories(adata, groupby)
     palette = _group_colors(adata, groupby, len(cat.categories))
@@ -247,7 +249,7 @@ def chromosome_heatmap_summary(
     rows = (np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)) > 0).astype(np.int64)
     norm = opts.color_norm(float(np.min(means)), float(np.max(means)))
     axes = _draw(fig, ax, adata, groupby, cat, palette, opts.transform(means), rows, dendro, use_rep, norm, cmap, opts)
-    return _finish(fig, axes, show=show, save=save, return_fig=return_fig)
+    return _finish(fig, axes, show=show, save=save, return_fig=return_fig, own=own)
 
 
 # --- options of mode="fast" -------------------------------------------------------------------------------------------
@@ -339,7 +341,7 @@ def _use_legacy(func: str, adata: AnnData, groupby: str, use_rep: str, mode: str
 
 
 def _legacy(
-    fn: Callable[..., dict[str, Axes] | None],
+    fn: Callable[..., dict[str, Axes]],
     adata: AnnData,
     groupby: str,
     use_rep: str,
@@ -353,23 +355,19 @@ def _legacy(
 ) -> Figure | dict[str, Axes] | None:
     if ax is not None:
         raise ValueError("`ax` needs mode='fast' (and only arguments that it supports, see `mode`).")
-    common = {"groupby": groupby, "use_rep": use_rep, "cmap": cmap, "figsize": figsize, "save": save}
-    if not return_fig:
-        return fn(adata, show=show, **common, **kwargs)
-    axes = fn(adata, show=False, **common, **kwargs)
-    assert axes is not None
+    axes = fn(adata, groupby=groupby, use_rep=use_rep, cmap=cmap, figsize=figsize, **kwargs)
     fig = axes["heatmap_ax"].get_figure(root=True)
     assert fig is not None
-    return fig
+    return _finish(fig, axes, show=show, save=save, return_fig=return_fig)
 
 
-def _legacy_heatmap(adata: AnnData, **kwargs) -> dict[str, Axes] | None:
+def _legacy_heatmap(adata: AnnData, **kwargs) -> dict[str, Axes]:
     from infercnvpy.pl._chromosome_heatmap_legacy import legacy_heatmap
 
     return legacy_heatmap(adata, **kwargs)
 
 
-def _legacy_summary(adata: AnnData, **kwargs) -> dict[str, Axes] | None:
+def _legacy_summary(adata: AnnData, **kwargs) -> dict[str, Axes]:
     from infercnvpy.pl._chromosome_heatmap_legacy import legacy_summary
 
     return legacy_summary(adata, **kwargs)
@@ -661,26 +659,36 @@ def _keep_labels(pos: np.ndarray, extent: np.ndarray, priority: np.ndarray) -> n
     return keep
 
 
-def _finish(
-    fig: Figure, axes: dict[str, Axes], *, show: bool | None, save: str | bool | None, return_fig: bool | None
-) -> Figure | dict[str, Axes] | None:
-    if sc.settings.autosave if save is None else save:
-        _save(fig, save)
+def _finish[T](
+    fig: Figure,
+    axes: T,
+    *,
+    show: bool | None,
+    save: str | bool | None,
+    return_fig: bool | None,
+    name: str = "heatmap",
+    own: bool = True,
+) -> Figure | T | None:
+    """Save, show and return as scanpy's `savefig_or_show` does.
+
+    The figure is saved as `<figdir>/<name><save><plot_suffix>.<ext>`, with `ext` from the end of `save` if that is
+    `.svg`, `.pdf` or `.png`. A saved figure is closed unless it is returned or not `own` (drawn into a given `ax`).
+    """
+    saved = sc.settings.autosave if save is None else isinstance(save, str) or save
+    if saved:
+        ext = sc.settings.file_format_figs
+        if isinstance(save, str):
+            if save.endswith((".svg", ".pdf", ".png")):
+                save, ext = save[:-4], save[-3:]
+            name += save
+        figdir = Path(sc.settings.figdir)
+        figdir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(figdir / f"{name}{sc.settings.plot_suffix}.{ext}", bbox_inches="tight")
     if return_fig:
         return fig
-    if sc.settings.autoshow if show is None else show:
+    show = sc.settings.autoshow if show is None else show
+    if show:
         plt.show()
-        return None
-    return axes
-
-
-def _save(fig: Figure, save: str | bool | None) -> None:
-    """Save as `<figdir>/heatmap<save><plot_suffix>.<ext>`, the file name `scanpy.pl.heatmap` used."""
-    name, ext = "heatmap", sc.settings.file_format_figs
-    if isinstance(save, str):
-        if (suffix := Path(save).suffix) in {".svg", ".pdf", ".png"}:
-            save, ext = save.removesuffix(suffix), suffix[1:]
-        name += save
-    figdir = Path(sc.settings.figdir)
-    figdir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(figdir / f"{name}{sc.settings.plot_suffix}.{ext}", bbox_inches="tight")
+    if saved and own:
+        plt.close(fig)
+    return None if show else axes

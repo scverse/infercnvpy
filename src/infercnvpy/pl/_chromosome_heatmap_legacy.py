@@ -29,10 +29,8 @@ def legacy_heatmap(
     use_rep: str,
     cmap: str | Colormap,
     figsize: tuple[float, float],
-    show: bool | None,
-    save: str | bool | None,
     **kwargs,
-) -> dict[str, Axes] | None:
+) -> dict[str, Axes]:
     """Every cell as a row of :func:`scanpy.pl.heatmap`, in the original order within each group."""
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`adata.obsm['X_{use_rep}']`")
     obs = _as_df(adata.obs)
@@ -67,16 +65,12 @@ def legacy_heatmap(
         var_group_positions=var_group_positions,
         var_group_labels=list(chr_pos_dict.keys()),
         show=False,
+        save=False,
         **kwargs,
     )
 
     return_ax_dic["heatmap_ax"].vlines(chr_pos[1:], lw=0.6, ymin=0, ymax=tmp_adata.shape[0])
-
-    savefig_or_show("heatmap", show=show, save=save)
-    show = sc.settings.autoshow if show is None else show
-    if not show:
-        return return_ax_dic
-    return None
+    return return_ax_dic
 
 
 def _stable_group_order(adata: AnnData, groupby: str, dendrogram: bool | str) -> np.ndarray:
@@ -105,10 +99,8 @@ def legacy_summary(
     use_rep: str,
     cmap: str | Colormap,
     figsize: tuple[float, float],
-    show: bool | None,
-    save: str | bool | None,
     **kwargs,
-) -> dict[str, Axes] | None:
+) -> dict[str, Axes]:
     """Every group mean as 10 rows of :func:`scanpy.pl.heatmap`."""
     # this dirty hack repeats each row 10 times, since scanpy
     # heatmap cannot really handle it if there's just one observation
@@ -156,13 +148,9 @@ def legacy_summary(
         var_group_positions=var_group_positions,
         var_group_labels=list(chr_pos_dict.keys()),
         show=False,
+        save=False,
         **kwargs,
     )
 
     return_ax_dic["heatmap_ax"].vlines(chr_pos[1:], lw=0.6, ymin=-1, ymax=tmp_adata.shape[0])
-
-    savefig_or_show("heatmap", show=show, save=save)
-    show = sc.settings.autoshow if show is None else show
-    if not show:
-        return return_ax_dic
-    return None
+    return return_ax_dic

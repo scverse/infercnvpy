@@ -320,6 +320,46 @@ def test_save(adata_small, tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted([f"heatmap.{ext}", "heatmap_summary.png"])
 
 
+@pytest.mark.parametrize("mode", ["fast", "legacy"])
+@both_plots
+def test_save_like_scanpy(adata_small, tmp_path, plot, mode):
+    """`save` names the file as `scanpy.pl.heatmap` does, and the figure is closed after saving unless returned."""
+    adata_small = adata_small[adata_small.obs["group"].notna()].copy()
+    figdir, fmt = sc.settings.figdir, sc.settings.file_format_figs
+    sc.settings.figdir, sc.settings.file_format_figs = tmp_path, "pdf"
+    try:
+        plot(adata_small, groupby="group", show=False, save=".png", mode=mode)
+        plot(adata_small, groupby="group", show=False, save="", mode=mode)
+        assert not plt.get_fignums()
+        fig = plot(adata_small, groupby="group", save="_fig.svg", return_fig=True, mode=mode)
+        assert plt.fignum_exists(fig.number)
+        if mode == "fast":
+            _, ax = plt.subplots()
+            plot(adata_small, groupby="group", ax=ax, show=False, save="_ax")
+            assert plt.fignum_exists(ax.get_figure(root=True).number)
+    finally:
+        sc.settings.figdir, sc.settings.file_format_figs = figdir, fmt
+    expected = {"heatmap.png", "heatmap.pdf", "heatmap_fig.svg"} | ({"heatmap_ax.pdf"} if mode == "fast" else set())
+    assert {p.name for p in tmp_path.iterdir()} == expected
+
+
+@pytest.mark.parametrize("mode", ["fast", "legacy"])
+def test_autosave(adata_small, tmp_path, mode):
+    """With `scanpy.settings.autosave`, the heatmap is saved once (scanpy's own save does not leave a blank one)."""
+    adata_small = adata_small[adata_small.obs["group"].notna()].copy()
+    settings = sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave
+    sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave = tmp_path, "png", True
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            cnv.pl.chromosome_heatmap(adata_small, groupby="group", show=False, mode=mode)
+    finally:
+        sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave = settings
+    assert [p.name for p in tmp_path.iterdir()] == ["heatmap.png"]
+    assert (plt.imread(tmp_path / "heatmap.png")[..., :3] < 0.9).any()
+    assert not plt.get_fignums()
+
+
 def test_bad_arguments(adata_small):
     with pytest.raises(ValueError, match="tl.leiden"):
         cnv.pl.chromosome_heatmap(adata_small)
