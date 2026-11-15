@@ -198,8 +198,13 @@ def copy_number(
         :func:`~infercnvpy.tl.smooth_cnv` does for a CNV matrix. Each cell's posterior clone probabilities and llr
         become the mean over the cell and its neighbours (weighted by the graph); labels, clones and profiles follow
         from the smoothed posteriors with the same rules. On imaging data, where single cells hold few counts and
-        neighbours usually share their clone, this recovers clone profiles much better, at the cost of blurring the
-        boundary between clones by about `n_hops` neighbours. Default `None`: no smoothing.
+        neighbours usually share their clone, this lowers the errors inside clones and the false calls in normal
+        tissue, at the cost of blurring the boundary between clones by about `n_hops` neighbours. About 10 neighbours
+        (`squidpy.gr.spatial_neighbors_knn(adata, n_neighs=10)`) kept boundaries best on simulated clones; 100
+        blurred them more than no smoothing. Across cell types, smoothing also spreads tumour calls into the normal
+        cells next to a tumour. To avoid that, set the graph's entries between cells of different types to 0; this
+        suits tumours that follow a cell type, while the full graph suits clones that span types.
+        Default `None`: no smoothing.
     n_hops
         Number of smoothing steps over the graph of `connectivity_key`; each step reaches one more edge away.
     force_calls
