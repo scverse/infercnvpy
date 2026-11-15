@@ -55,6 +55,7 @@ HG38_LENGTHS = {
 _KMEANS_ITER = 20
 
 LABELS = ("aneuploid", "diploid", "not.defined")
+UNDETERMINED = "undetermined"
 
 #: Markers of immune, endothelial and stromal cells, which are rarely tumour cells
 NORMAL_MARKERS = (
@@ -85,6 +86,8 @@ _MAX_SPILL = 0.5  # largest spillover fraction of tumour transcripts in a normal
 _MIN_SEED = 10  # cells of the smallest group that can be the first diploid group
 _MIN_SEG_GENES = 20  # genes of the shortest run that counts towards the burden; fewer on small panels
 _MIN_EFFECT = 0.1  # smallest posterior mean log ratio that counts as a copy number change
+_MIN_PANEL_GENES = 1000  # genes passing the filters below which the calls are undetermined (small panels)
+_MIN_MEDIAN_COUNTS = 150  # median counts per cell in those genes below which the calls are undetermined
 
 
 def copy_number(
@@ -107,6 +110,7 @@ def copy_number(
     max_fit_cells: int | None = None,
     connectivity_key: str | None = None,
     n_hops: int = 1,
+    force_calls: bool = False,
     bin_size: int = 1_000_000,
     chunksize: int = 5000,
     random_state: int = 0,
@@ -198,6 +202,12 @@ def copy_number(
         boundary between clones by about `n_hops` neighbours. Default `None`: no smoothing.
     n_hops
         Number of smoothing steps over the graph of `connectivity_key`; each step reaches one more edge away.
+    force_calls
+        Call cells even where the data hold too little copy number information. With fewer than 1,000 genes passing
+        the filters (small imaging panels) or a median below 150 counts per cell in those genes, the calls are not
+        reliable, so by default copy_number logs a warning and labels the cells `"undetermined"` without fitting the
+        model. For such data, use :func:`~infercnvpy.tl.infercnv` with reference cells, smoothed with
+        :func:`~infercnvpy.tl.smooth_cnv`.
     calculate_gene_values
         Also store the copy number log ratio of every gene (cells x genes) in
         `adata.layers["gene_values_{key_added}"]`, as :func:`~infercnvpy.tl.infercnv` does. Gene values come from the
@@ -305,6 +315,9 @@ def copy_number(
         data = _Data(source, cells[fit], lay, window_size)
         n_fit = len(fit)
         tm("window counts")
+        depth = float(np.median(data.size))
+        if not force_calls and (lay.n_genes < _MIN_PANEL_GENES or depth < _MIN_MEDIAN_COUNTS):
+            return _undetermined(adata, cells, lay, depth, bin_size, calculate_gene_values, key_added, params, inplace)
         hmm = _HMM(lay, segment_length)
 
         # expression clusters and their pooled profiles
@@ -457,6 +470,48 @@ def copy_number(
         remedy="lower `min_genes`",
         time=start,
     )
+    if not inplace:
+        return obs, cna, uns, gene_values
+    for c in obs.columns:
+        adata.obs[c] = obs[c]
+    adata.obsm[f"X_{key_added}"] = cna
+    if gene_values is not None:
+        adata.layers[f"gene_values_{key_added}"] = gene_values
+    adata.uns[key_added] = uns
+    return None
+
+
+def _undetermined(adata, cells, lay, depth, bin_size, calculate_gene_values, key_added, params, inplace):
+    """The outputs of copy_number with every filtered cell `"undetermined"` (too little copy number information)."""
+    log.warning(
+        "copy_number: %d genes pass the filters, with a median of %d counts per cell; reliable calls need at least "
+        "%d genes and %d counts per cell, so %d cells are labelled %r. For small panels, use `tl.infercnv` with "
+        "reference cells, smoothed with `tl.smooth_cnv`; `force_calls=True` calls the cells anyway.",
+        lay.n_genes, depth, _MIN_PANEL_GENES, _MIN_MEDIAN_COUNTS, len(cells), UNDETERMINED,
+    )  # fmt: skip
+    bins, chr_pos, _ = lay.bins(np.arange(lay.n_genes), bin_size)
+    status = np.full(adata.n_obs, LABELS[2], dtype=object)
+    status[cells] = UNDETERMINED
+    obs = pd.DataFrame(
+        {
+            key_added: pd.Categorical(status, categories=[*LABELS, UNDETERMINED]),
+            f"{key_added}_score": np.nan,
+            f"{key_added}_llr": np.nan,
+            f"{key_added}_clone": pd.Categorical(np.full(adata.n_obs, None, dtype=object)),
+            f"{key_added}_spillover": np.nan,
+        },
+        index=adata.obs_names,
+    )
+    cna = np.full((adata.n_obs, len(bins)), np.nan, dtype=np.float32)
+    gene_values = np.full((adata.n_obs, adata.n_vars), np.nan, dtype=np.float32) if calculate_gene_values else None
+    uns = {
+        "chr_pos": chr_pos,
+        "bins": bins,
+        "window_start": bins["start"].to_numpy(),
+        "window_end": bins["end"].to_numpy(),
+        "undetermined": {"n_genes": lay.n_genes, "median_counts": depth},
+        "params": params,
+    }
     if not inplace:
         return obs, cna, uns, gene_values
     for c in obs.columns:

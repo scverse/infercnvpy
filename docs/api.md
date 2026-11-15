@@ -70,7 +70,8 @@ Which function to use:
   segments, from raw counts, with or without reference cells. Use it for droplet and imaging UMI data, not for
   Smart-seq2. Providing reference cells improves the detection of small clones on dense panels. On imaging data,
   `connectivity_key` smooths its posteriors over a spatial neighbour graph, like {func}`~infercnvpy.tl.smooth_cnv`
-  does for a CNV matrix.
+  does for a CNV matrix. With fewer than 1,000 usable genes (small panels such as Xenium 480) or a median below
+  150 counts per cell, it labels the cells `"undetermined"` instead of calling them; use `tl.infercnv` there.
 
 Both write their profiles to `adata.obsm` and `adata.uns` in the same layout, so the plots, scores, embeddings and
 spatial tools below accept the output of either (`use_rep="cnv"` or `use_rep="copy_number"`).

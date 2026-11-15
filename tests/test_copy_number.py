@@ -110,7 +110,7 @@ def test_copy_number_small_panel_keeps_labels():
     called diploid (accuracy 0.4 here).
     """
     adata = _simulate(n_tumour=600, n_normal=400, depth=1000, n_chrom=22, genes=45)
-    cnv.tl.copy_number(adata, n_jobs=2, min_genes=10, min_detection=0.01)
+    cnv.tl.copy_number(adata, n_jobs=2, min_genes=10, min_detection=0.01, force_calls=True)
     tumour = adata.obs["truth"].to_numpy() == "tumour"
     assert ((adata.obs["copy_number"] == "aneuploid").to_numpy() == tumour).mean() >= 0.95
 
@@ -206,6 +206,36 @@ def test_count_kernels_match_scipy():
         np.testing.assert_allclose(ll2[r, 0], ref_ll[0, 0])
 
 
+@pytest.mark.parametrize(
+    ("kw", "reason"),
+    [
+        ({"n_chrom": 22, "genes": 45}, "genes"),  # a ~1,000-gene panel
+        ({"depth": 60}, "counts"),  # 2,400 genes, but 60 counts per cell
+    ],
+)
+def test_copy_number_undetermined_on_too_little_information(kw, reason, caplog):
+    adata = _simulate(**kw)
+    with caplog.at_level("WARNING"):
+        obs, X, uns, _ = cnv.tl.copy_number(adata, min_genes=5, min_detection=0.01, n_jobs=2, inplace=False)
+    assert "undetermined" in caplog.text and "tl.infercnv" in caplog.text
+    assert (obs["copy_number"] == "undetermined").all()
+    assert obs[["copy_number_score", "copy_number_llr", "copy_number_spillover"]].isna().all().all()
+    assert obs["copy_number_clone"].isna().all()
+    assert np.isnan(X).all() and X.shape == (adata.n_obs, len(uns["bins"]))
+    info = uns["undetermined"]
+    if reason == "genes":
+        assert info["n_genes"] < M._MIN_PANEL_GENES
+    else:
+        assert info["median_counts"] < M._MIN_MEDIAN_COUNTS
+    forced = cnv.tl.copy_number(adata, min_genes=5, min_detection=0.01, n_jobs=2, inplace=False, force_calls=True)[0]
+    assert set(forced["copy_number"].unique()) <= {"aneuploid", "diploid", "not.defined"}
+
+
+def test_copy_number_default_data_pass_the_guard():
+    obs = cnv.tl.copy_number(_simulate(), n_jobs=2, inplace=False)[0]
+    assert "undetermined" not in obs["copy_number"].cat.categories
+
+
 def _knn_graph(xy, k):
     from scipy.spatial import cKDTree
 
@@ -224,7 +254,7 @@ def test_copy_number_spatial_smoothing():
     xy[:, 0] = np.where(tumour, xy[:, 0] * 0.5, 0.5 + xy[:, 0] * 0.5)
     adata.obsp["spatial_connectivities"] = _knn_graph(xy, 10)
     adata.obsp["empty_connectivities"] = sp.csr_matrix((adata.n_obs, adata.n_obs))
-    kw = {"min_genes": 5, "n_jobs": 2, "inplace": False}
+    kw = {"min_genes": 5, "n_jobs": 2, "inplace": False, "force_calls": True}
     plain = cnv.tl.copy_number(adata, **kw)
     smooth = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", **kw)
     same = cnv.tl.copy_number(adata, connectivity_key="empty_connectivities", **kw)
