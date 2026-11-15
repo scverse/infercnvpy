@@ -208,13 +208,13 @@ def infercnv(
     positions: Any = adata.var[["chromosome", "start", "end"]]
     # the lazy `var` of `anndata.experimental.read_lazy` has to be loaded
     var: pd.DataFrame = positions.to_memory() if hasattr(positions, "to_memory") else positions
-    var_mask = var["chromosome"].isnull()
+    var_mask = var["chromosome"].isnull() | var["start"].isnull()
     n_unplaced = int(var_mask.sum())
     if exclude_chromosomes is not None:
         var_mask = var_mask | var["chromosome"].isin(exclude_chromosomes)
-    if not var.loc[~var_mask, "chromosome"].astype(str).str.startswith("chr").any():
+    if not _on_used_chromosomes(var, var_mask.to_numpy()).any():
         raise ValueError(
-            'None of the chromosome names in `adata.var["chromosome"]` start with "chr". '
+            'None of the chromosome names in `adata.var["chromosome"]` start with "chr" (chrM is not used). '
             'infercnvpy only uses chromosomes named like "chr1". Add the prefix, e.g. with '
             '`adata.var["chromosome"] = "chr" + adata.var["chromosome"].astype(str)`.'
         )
@@ -235,8 +235,11 @@ def infercnv(
             low = (_means(source, all_cells, 1, lazy=lazy, expm1=True)[0] < min_mean) & ~mask
             n_low = int(low.sum())
             mask = mask | low
-            if mask.all():
-                raise ValueError(f"No genes left: all genes have a mean expression below `min_mean={min_mean}`.")
+            if not _on_used_chromosomes(var, mask).any():
+                raise ValueError(
+                    f"No genes left: all genes on chromosomes named like chr1 have a mean expression below "
+                    f"`min_mean={min_mean}`."
+                )
         layout = _Layout(var, mask, window_size, step)
         ref = _get_reference(adata, reference_key, reference_cat, reference, layer, source=source, lazy=lazy)
         plan = _Plan.build(layout, ref, lfc_clip, dynamic_threshold, noise_reference)
@@ -303,6 +306,12 @@ def _natural_sort(l: Sequence):
     return sorted(l, key=alphanum_key)
 
 
+def _on_used_chromosomes(var: pd.DataFrame, mask: np.ndarray) -> np.ndarray:
+    """Genes not in `mask` on a chromosome infercnvpy uses (named like "chr1", not "chrM")."""
+    chromosome = var["chromosome"].astype(str)
+    return ~mask & chromosome.str.startswith("chr").to_numpy() & (chromosome != "chrM").to_numpy()
+
+
 def _categories(reference_cat: str | Sequence[str]) -> np.ndarray:
     return np.array([reference_cat] if isinstance(reference_cat, str) else reference_cat)
 
@@ -334,7 +343,8 @@ class _Layout:
             K = len(range(0, g - n + 1, step))
             pos = used.loc[genes]
             starts.append(pos["start"].to_numpy(dtype=np.int64)[: (K - 1) * step + 1 : step])
-            ends.append(sliding_window_view(pos["end"].to_numpy(dtype=np.int64), n)[::step][:K].max(axis=1))
+            end = pos["end"].fillna(pos["start"]).to_numpy(dtype=np.int64)  # a gene without an end ends at its start
+            ends.append(sliding_window_view(end, n)[::step][:K].max(axis=1))
             order.append(var.index.get_indexer(genes))
             geometry.append((n_genes, g, a, b, K, n_windows))
             # per gene: the windows `first .. last` that contain it, and its pyramid weight in each
@@ -431,6 +441,8 @@ def _windows(
         _cnv_csr(X.data, X.indices, X.indptr, *shared, serial=serial)
     else:
         _cnv_dense(X, *shared, serial=serial)
+    if np.isnan(rowstats[:, 0]).any():
+        raise ValueError("infercnv needs finite values, but the expression matrix or the reference contains NaN.")
     return windows, rowstats, counts
 
 

@@ -27,13 +27,16 @@ from infercnvpy._numba import njit, njit_parallel, prange
 
 @njit
 def _lfc(v, lo, hi, cap):
-    """Clipped log fold change of `v` against the reference bounds `[lo, hi]` (`lo == hi` for one reference)."""
+    """Clipped log fold change of `v` against the reference bounds `[lo, hi]` (`lo == hi` for one reference).
+
+    NaN in `v`, `lo` or `hi` gives NaN.
+    """
     if v > hi:
         d = v - hi
-    elif v < lo:
-        d = v - lo
-    else:
+    elif v >= lo:
         return np.float32(0)
+    else:
+        d = v - lo
     if d > cap:
         return cap
     if d < -cap:
