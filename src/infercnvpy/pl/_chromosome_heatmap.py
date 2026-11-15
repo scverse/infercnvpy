@@ -473,7 +473,9 @@ def _cell_dendrogram(X: Any, cat: pd.Categorical) -> dict[str, Any]:
 def _scanpy_dendrogram(X: Any, groups: pd.Categorical) -> dict[str, Any]:
     """`dendrogram_info` of :func:`scanpy.tl.dendrogram` with its defaults, of the rows of `X` grouped by `groups`."""
     obs = pd.DataFrame({"group": groups}, index=np.arange(len(groups)).astype(str))
-    return sc.tl.dendrogram(AnnData(X, obs=obs), "group", inplace=False)["dendrogram_info"]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "You’re trying to run this on", UserWarning)  # that it uses a PCA
+        return sc.tl.dendrogram(AnnData(X, obs=obs), "group", inplace=False)["dendrogram_info"]
 
 
 def _pca_group_means(X: Any, means: np.ndarray) -> np.ndarray:

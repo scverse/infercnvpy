@@ -188,7 +188,9 @@ def test_dendrogram_like_legacy_with_many_windows(fmt, seed, plot):
     expected = [t.get_text() for t in legacy["groupby_ax"].get_yticklabels()]
     adata = _many_windows(seed)
     adata.obsm["X_cnv"] = fmt(adata.obsm["X_cnv"])
-    fast = plot(adata, groupby="g", dendrogram=True, show=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)  # not scanpy's warning that it falls back to a PCA
+        fast = plot(adata, groupby="g", dendrogram=True, show=False)
     assert [t.get_text() for t in fast["groupby_ax"].get_yticklabels()] == expected
 
 
