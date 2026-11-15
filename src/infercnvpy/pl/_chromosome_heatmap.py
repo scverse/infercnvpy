@@ -15,7 +15,7 @@ from matplotlib.artist import Artist
 from matplotlib.colors import BoundaryNorm, Colormap, ListedColormap, Normalize, TwoSlopeNorm
 from matplotlib.path import Path as MplPath
 from matplotlib.text import Text
-from matplotlib.ticker import Formatter
+from matplotlib.ticker import FixedFormatter
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.axes_grid1.axes_size import Fixed
 
@@ -637,29 +637,18 @@ def _chromosome_brackets(
 def _thin_group_labels(ax: Axes, labels: list[str], centers: np.ndarray, rows: np.ndarray, *, swap: bool) -> None:
     """Leave out the tick labels of groups that would overlap the label of a larger group, at drawing time."""
     axis = ax.xaxis if swap else ax.yaxis
-    formatter = _ThinnedLabels(labels)
+    formatter = FixedFormatter(labels)
     axis.set_major_formatter(formatter)
 
     def thin(renderer: RendererBase) -> None:
         proto = axis.get_major_ticks()[0].label1  # font and rotation of the tick labels
         pos = ax.transData.transform(np.column_stack([centers, centers]))[:, 0 if swap else 1]
         extent = np.array([_extent(proto, label, renderer, along_x=swap) for label in labels])
-        formatter.shown = _keep_labels(pos, extent, rows)
+        formatter.seq = [
+            label if keep else "" for label, keep in zip(labels, _keep_labels(pos, extent, rows), strict=True)
+        ]
 
     ax.add_artist(_BeforeDraw(thin))
-
-
-class _ThinnedLabels(Formatter):
-    """Fixed tick labels (as `set_ticks(ticks, labels)`), of which only those in `shown` are drawn."""
-
-    def __init__(self, labels: list[str]):
-        self.labels = labels
-        self.shown = np.ones(len(labels), dtype=bool)
-
-    def __call__(self, x: float, pos: int | None = None) -> str:
-        if pos is None or pos >= len(self.labels) or not self.shown[pos]:
-            return ""
-        return self.labels[pos]
 
 
 class _BeforeDraw(Artist):
