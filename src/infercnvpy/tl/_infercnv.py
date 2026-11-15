@@ -327,7 +327,7 @@ class _Layout:
         chromosomes = _natural_sort([x for x in used["chromosome"].unique() if x.startswith("chr") and x != "chrM"])
         order, geometry, scatter, starts, ends = [], [], [], [], []
         self.chr_pos: dict[str, int] = {}
-        n_genes = n_windows = self.n_covered = 0
+        n_genes = n_windows = 0
         for chromosome in chromosomes:
             # `sort_values` is not stable: genes with the same start keep the order infercnvpy has always used
             genes = used.loc[used["chromosome"] == chromosome].sort_values("start").index.to_numpy()
@@ -342,7 +342,7 @@ class _Layout:
             starts.append(pos["start"].to_numpy(dtype=np.int64)[: (K - 1) * step + 1 : step])
             ends.append(sliding_window_view(pos["end"].to_numpy(dtype=np.int64), n)[::step][:K].max(axis=1))
             order.append(var.index.get_indexer(genes))
-            geometry.append((n_genes, g, a, b, K, n_windows, n))
+            geometry.append((n_genes, g, a, b, K, n_windows))
             # per gene: the windows `first .. last` that contain it, and its pyramid weight in each
             i = np.arange(g)
             first = np.maximum(0, (i - n + step) // step)
@@ -351,7 +351,6 @@ class _Layout:
                 (n_windows + first, last - first + 1, i - first * step, np.full(g, n), np.full(g, min(a, b)))
             )
             self.chr_pos[chromosome] = n_windows
-            self.n_covered += min(g, (K - 1) * step + n)
             n_genes += g
             n_windows += K
         #: column in `var` of each gene in genomic order
@@ -364,7 +363,7 @@ class _Layout:
         self.col_map[self.order] = np.arange(n_genes)
         self.n_vars = len(var)
         self.n_windows = n_windows
-        g0s, gs, As, Bs, Ks, w0s, ns = (np.array(x, dtype=np.int64) for x in zip(*geometry, strict=True))
+        g0s, gs, As, Bs, Ks, w0s = (np.array(x, dtype=np.int64) for x in zip(*geometry, strict=True))
         self.geometry = (g0s, gs, As, Bs, Ks, w0s, step)
         self.step = step
         first, n_in, offset, length, ab = (np.concatenate(x).astype(np.int64) for x in zip(*scatter, strict=True))
@@ -378,7 +377,8 @@ class _Layout:
         self.scatter = (first, weights)
         #: per window: the sum of its pyramid weights
         self.window_weight = np.repeat((As * Bs).astype(np.float64), Ks)
-        self.gene_geometry = (gs, ns, Ks, w0s, g0s, step, self.order, self.n_covered)
+        #: what `_gene_values` needs: windows per chromosome, and per gene the windows that contain it
+        self.gene_geometry = (g0s, gs, Ks, w0s, first, n_in, self.order)
 
 
 @dataclass(frozen=True)
