@@ -26,7 +26,7 @@ import numba
 import numpy as np
 import scipy.sparse as sp
 
-from infercnvpy._numba import _on_main_thread, njit_parallel, prange
+from infercnvpy._numba import njit_parallel, prange, runs_serially
 
 N_BINS = 1 << 20  # bin width 2 / 2^20 ~ 2e-6
 TILE = 2048  # rows per block: a block of correlations is TILE x cells float32
@@ -152,7 +152,7 @@ def corr_iqr(
             C = C[~np.eye(n, dtype=bool)]
         q75, q25 = np.percentile(C, [75, 25])
         return q75 - q25, n_dropped, False
-    hists = np.zeros((numba.get_num_threads() if _on_main_thread() else 1, N_BINS), dtype=np.int64)
+    hists = np.zeros((1 if runs_serially() else numba.get_num_threads(), N_BINS), dtype=np.int64)
     for r0 in range(0, n, tile):
         _bin_tile(Z[r0 : r0 + tile] @ Z[r0:].T, r0, hists)
     hist = hists.sum(axis=0)

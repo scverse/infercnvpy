@@ -14,7 +14,7 @@ from anndata import AnnData
 from numpy.lib.stride_tricks import sliding_window_view
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log, log_result
-from infercnvpy._numba import n_kernel_chunks, numba_threads
+from infercnvpy._numba import dask_task, n_kernel_chunks, numba_threads
 from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column, _params_for_uns
 from infercnvpy.tl._infercnv_kernels import (
     _cnv_csr,
@@ -419,7 +419,7 @@ class _Plan:
 
 
 def _windows(
-    plan: _Plan, X, rows: np.ndarray, band=None, *, out: bool = True, serial: bool = False
+    plan: _Plan, X, rows: np.ndarray, band=None, *, out: bool = True
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Median-centred windows (float32) of the rows `rows` of `X`, their (sum, sum of squares), and their counts.
 
@@ -432,15 +432,15 @@ def _windows(
     rowstats = np.empty((n_rows, 2), dtype=np.float64)
     counts = np.empty(n_rows, dtype=np.int64)
     thr, centre = (np.inf, 0.0) if band is None else band
-    n_chunks = n_kernel_chunks(n_rows, serial=serial)
+    n_chunks = n_kernel_chunks(n_rows)
     shared = (
         rows, lay.col_map, plan.lo, plan.hi, plan.base, plan.cap, *lay.geometry, *lay.scatter, lay.window_weight,
         plan.base_sums, plan.max_nnz, thr, centre, windows, rowstats, counts, n_chunks,
     )  # fmt: skip
     if sp.issparse(X):
-        _cnv_csr(X.data, X.indices, X.indptr, *shared, serial=serial)
+        _cnv_csr(X.data, X.indices, X.indptr, *shared)
     else:
-        _cnv_dense(X, *shared, serial=serial)
+        _cnv_dense(X, *shared)
     if np.isnan(rowstats[:, 0]).any():
         raise ValueError("infercnv needs finite values, but the expression matrix or the reference contains NaN.")
     return windows, rowstats, counts
@@ -491,7 +491,7 @@ class _CsrBuilder:
             self.indices = np.empty(0, dtype=idx_dtype)
         self.n = 0
 
-    def add(self, windows: np.ndarray, counts: np.ndarray, band: tuple[float, float], serial: bool = False):
+    def add(self, windows: np.ndarray, counts: np.ndarray, band: tuple[float, float]):
         """Append the rows `windows`, with `counts` values outside the noise `band` per row."""
         r0, r1 = self.n, self.n + len(windows)
         indptr = self.indptr[r0 : r1 + 1]
@@ -502,7 +502,7 @@ class _CsrBuilder:
             size = max(nnz, int(nnz / r1 * self.shape[0] * 1.05), self.data.size * 5 // 4)
             self.data.resize(size, refcheck=False)
             self.indices.resize(size, refcheck=False)
-        _fill_kept(windows, *band, indptr, self.data, self.indices, serial=serial)
+        _fill_kept(windows, *band, indptr, self.data, self.indices)
         self.n = r1
 
     def finish(self) -> sp.csr_matrix:
@@ -514,17 +514,17 @@ class _CsrBuilder:
         return sp.csr_matrix((self.data, indices, self.indptr.astype(idx_dtype)), shape=self.shape, copy=False)
 
 
-def _to_csr(windows: np.ndarray, counts: np.ndarray, band: tuple[float, float], serial: bool = False) -> sp.csr_matrix:
+def _to_csr(windows: np.ndarray, counts: np.ndarray, band: tuple[float, float]) -> sp.csr_matrix:
     """The entries of `windows` outside the noise band (`counts` per row) as a CSR matrix."""
     builder = _CsrBuilder(*windows.shape)
-    builder.add(windows, counts, band, serial=serial)
+    builder.add(windows, counts, band)
     return builder.finish()
 
 
-def _gene_values_of(plan: _Plan, out: np.ndarray, band: tuple[float, float], serial: bool = False) -> np.ndarray:
+def _gene_values_of(plan: _Plan, out: np.ndarray, band: tuple[float, float]) -> np.ndarray:
     gv = np.full((out.shape[0], plan.layout.n_vars), np.nan, dtype=np.float32)
-    n_chunks = n_kernel_chunks(out.shape[0], serial=serial)
-    _gene_values(out, *plan.layout.gene_geometry, *band, gv, n_chunks, serial=serial)
+    n_chunks = n_kernel_chunks(out.shape[0])
+    _gene_values(out, *plan.layout.gene_geometry, *band, gv, n_chunks)
     return gv
 
 
@@ -559,7 +559,7 @@ def _run(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_values
 
 
 def _run_lazy(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_values: bool):
-    """The CNV matrix (and gene values) as lazy dask arrays; the serial kernels run inside dask tasks.
+    """The CNV matrix (and gene values) as lazy dask arrays; the kernels run serially inside the dask tasks.
 
     The noise band is computed first, by one dask computation over the blocks that hold `band_rows` (or all blocks).
     """
@@ -589,20 +589,23 @@ def _run_lazy(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_v
     return res, gv, band
 
 
+@dask_task
 def _dask_stats_task(block, plan: _Plan, local: np.ndarray | None) -> np.ndarray:
     X = _kernel_ready(block)
-    return _windows(plan, X, np.arange(X.shape[0]) if local is None else local, out=False, serial=True)[1]
+    return _windows(plan, X, np.arange(X.shape[0]) if local is None else local, out=False)[1]
 
 
+@dask_task
 def _lazy_cnv_block(plan: _Plan, band, block) -> sp.csr_matrix:
     X = _kernel_ready(block)
-    windows, _, counts = _windows(plan, X, np.arange(X.shape[0]), band, serial=True)
-    return _to_csr(windows, counts, band, serial=True)
+    windows, _, counts = _windows(plan, X, np.arange(X.shape[0]), band)
+    return _to_csr(windows, counts, band)
 
 
+@dask_task
 def _lazy_gene_values_block(plan: _Plan, band, block) -> np.ndarray:
     X = _kernel_ready(block)
-    return _gene_values_of(plan, _windows(plan, X, np.arange(X.shape[0]), serial=True)[0], band, serial=True)
+    return _gene_values_of(plan, _windows(plan, X, np.arange(X.shape[0]))[0], band)
 
 
 class _Rows:
@@ -796,6 +799,7 @@ def _block_groups(source: _Rows, i: int, local: np.ndarray | None, codes: np.nda
     return local, codes[s + local]
 
 
+@dask_task
 def _dask_block_sums(block, local: np.ndarray, groups: np.ndarray, n_groups: int, expm1: bool = False) -> np.ndarray:
     return _group_sums(_kernel_ready(block), local, groups, n_groups, expm1=expm1)
 

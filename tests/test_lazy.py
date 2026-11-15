@@ -135,6 +135,26 @@ def test_lazy_output(base, expected, scheduler):
     _check(_with_X(base, X), expected, lazy=True)
 
 
+@pytest.mark.parametrize("scheduler", ["synchronous", "processes"])
+def test_kernels_in_dask_tasks_run_serially(base, expected, scheduler, monkeypatch):
+    """Inside a dask task, every kernel runs its serial twin, also on the main thread (synchronous, or processes)."""
+    from infercnvpy._numba import njit_parallel
+    from infercnvpy.tl import _infercnv_kernels
+
+    parallel_calls = []
+
+    def spy(name, kernel):
+        return lambda *args: (parallel_calls.append(name), kernel.serial(*args))[1]
+
+    for name, kernel in vars(_infercnv_kernels).items():
+        if isinstance(kernel, njit_parallel):
+            monkeypatch.setattr(kernel, "parallel", spy(name, kernel))
+    a = _with_X(base, _csr_blocks(base, 50))
+    with dask.config.set(scheduler=scheduler):
+        _check(a, expected, lazy=True)
+    assert parallel_calls == []
+
+
 def test_lazy_is_opt_in(base):
     """Without `lazy=True`, the result of a dask array is in memory, whatever the active dask scheduler."""
     a = _with_X(base, _csr_blocks(base, 100))

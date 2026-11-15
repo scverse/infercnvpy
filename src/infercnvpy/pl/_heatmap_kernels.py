@@ -6,8 +6,8 @@ what matplotlib's nearest-neighbour downscaling shows when every cell is drawn) 
 `_bin_sums_csr` / `_bin_sums_dense` add up the rows of each run straight from the matrix, CSR without densifying).
 A figure is ~1000 pixels tall, so the result is a small dense matrix whatever the number of cells.
 
-The matrix is read in row blocks (`infercnvpy.tl._infercnv._Rows`): an in-memory matrix as one block with the parallel
-kernel, a dask array block by block and a backed matrix `CHUNKSIZE` rows at a time, with the serial kernel.
+The matrix is read in row blocks (`infercnvpy.tl._infercnv._Rows`): an in-memory matrix as one block, a dask array
+block by block and a backed matrix `CHUNKSIZE` rows at a time.
 """
 
 from __future__ import annotations
@@ -96,7 +96,6 @@ def binned_sums(X: Any, order: np.ndarray, bounds: np.ndarray) -> np.ndarray:
     row_bin = np.full(X.shape[0], -1, dtype=np.int64)
     row_bin[order] = np.repeat(np.arange(n_bins), np.diff(bounds))
     source = _blocks(X)
-    serial = source.kind != "in memory"
 
     def add(Xb, row0, n, start):
         local = np.flatnonzero(row_bin[start : start + n] >= 0)
@@ -106,9 +105,9 @@ def binned_sums(X: Any, order: np.ndarray, bounds: np.ndarray) -> np.ndarray:
         o = (row0 + local[by_bin]).astype(np.int64)
         bnd = np.append(first, len(o)).astype(np.int64)
         if sp.issparse(Xb):
-            _bin_sums_csr(Xb.indptr, Xb.indices, Xb.data, o, bnd, bins, sums, serial=serial)
+            _bin_sums_csr(Xb.indptr, Xb.indices, Xb.data, o, bnd, bins, sums)
         else:
-            _bin_sums_dense(Xb, o, bnd, bins, sums, serial=serial)
+            _bin_sums_dense(Xb, o, bnd, bins, sums)
 
     _each_block(source, add)
     return sums

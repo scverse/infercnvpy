@@ -41,8 +41,8 @@ With `lazy=True`, the result for a dask array stays a dask array of CSR blocks, 
 {meth}`dask.array.Array.map_blocks`. The noise band is computed first, with one dask computation. `lazy=True` has to
 be passed explicitly, also when a {class}`distributed.Client` is active. In this mode the dask scheduler decides how
 many blocks run at the same time, each in a single thread, and `n_jobs` is ignored. infercnvpy never starts numba
-threads inside a dask worker thread, because numba's default threading layer on macOS aborts the process when it is
-used from several threads at once.
+threads inside a dask task, with any scheduler: the scheduler's threads or processes already use the cores, and
+numba's default threading layer on macOS aborts the process when it is used from several threads at once.
 
 :::{note}
 infercnv expects log-normalised expression (see {ref}`input-data`). For a dask array, {func}`scanpy.pp.normalize_total`
