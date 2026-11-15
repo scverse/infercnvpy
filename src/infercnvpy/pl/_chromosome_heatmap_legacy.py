@@ -12,11 +12,6 @@ from matplotlib.colors import TwoSlopeNorm
 
 from infercnvpy._util import _as_df, _as_matrix
 
-try:
-    from scanpy.plotting._utils import savefig_or_show
-except ImportError:  # scanpy >= 1.13
-    from scanpy.plotting.legacy._utils import savefig_or_show
-
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.colors import Colormap
