@@ -1,3 +1,5 @@
+import warnings
+
 import dask
 import dask.array as da
 import numpy as np
@@ -5,7 +7,7 @@ import pandas as pd
 import pytest
 import scanpy as sc
 import scipy.sparse as sp
-from anndata import AnnData
+from anndata import AnnData, ImplicitModificationWarning
 from matplotlib import pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
@@ -159,6 +161,16 @@ def test_dendrogram_from_mean_profiles(adata_small):
     assert [t.get_text() for t in summary["groupby_ax"].get_yticklabels()] == expected
     X, g = adata_small.obsm["X_cnv"].toarray(), adata_small.obs["group"]
     np.testing.assert_allclose(_image(summary), [X[(g == c).to_numpy()].mean(axis=0) for c in expected], rtol=1e-6)
+
+
+def test_legacy_stores_group_colors(adata_small):
+    """scanpy gets an actual AnnData that shares `uns`, so the colours it picks land in the caller's `uns`."""
+    adata_small = adata_small[adata_small.obs["group"].notna()].copy()
+    del adata_small.uns["group_colors"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ImplicitModificationWarning)
+        cnv.pl.chromosome_heatmap(adata_small, groupby="group", show=False, mode="legacy")
+    assert "group_colors" in adata_small.uns
 
 
 @both_plots

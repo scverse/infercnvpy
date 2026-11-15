@@ -35,15 +35,16 @@ def legacy_heatmap(
 ) -> dict[str, Axes] | None:
     """Every cell as a row of :func:`scanpy.pl.heatmap`, in the original order within each group."""
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`adata.obsm['X_{use_rep}']`")
-    tmp_adata = AnnData(X=X, obs=_as_df(adata.obs), uns=adata.uns)
-    tmp_adata = tmp_adata[_stable_group_order(tmp_adata, groupby, kwargs.get("dendrogram", False))]
+    obs = _as_df(adata.obs)
+    # an actual AnnData (not a view) that shares `uns`, so the colours scanpy picks are stored in `adata.uns`
+    order = _stable_group_order(AnnData(X=X, obs=obs, uns=adata.uns), groupby, kwargs.get("dendrogram", False))
+    tmp_adata = AnnData(X=X[order], obs=obs.iloc[order], uns=adata.uns)
 
     # re-sort, as saving & loading anndata destroys the order
     chr_pos_dict = dict(sorted(adata.uns[use_rep]["chr_pos"].items(), key=lambda x: x[1]))
     chr_pos = list(chr_pos_dict.values())
 
     # center color map at 0
-    X = _as_matrix(tmp_adata.X)
     tmp_data = X if isinstance(X, np.ndarray) else X.data
     vmin = kwargs.pop("vmin", None)
     vmax = kwargs.pop("vmax", None)
