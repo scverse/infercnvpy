@@ -142,14 +142,14 @@ def infercnv(
         are NaN. This needs a dense float32 cells x genes matrix in memory.
     min_mean
         Leave out genes whose mean expression over all cells is below this value, before the
-        windows are formed. The mean is taken of `expm1` of the input, i.e. of the normalised
-        counts behind the log-normalised values (see :ref:`input-data`), not of the log values.
+        windows are formed. The mean is taken of `expm1` of the input, i.e. of the normalized
+        counts behind the log-normalized values (see :ref:`input-data`), not of the log values.
         This follows the `cutoff` of R inferCNV, which removes genes by their mean read count
         and suggests `1` for Smart-seq2 and `0.1` for 10x data. R applies its cutoff to the raw
-        counts before normalisation; the means here are on the scale of
+        counts before normalization; the means here are on the scale of
         :func:`scanpy.pp.normalize_total`, which are on the scale of the raw counts when the data
-        is normalised to the median total count (scanpy's default `target_sum=None`, as R
-        inferCNV normalises). Default: keep all genes.
+        is normalized to the median total count (scanpy's default `target_sum=None`, as R
+        inferCNV normalizes). Default: keep all genes.
 
     Returns
     -------
@@ -418,7 +418,7 @@ class _Plan:
 def _windows(
     plan: _Plan, X, rows: np.ndarray, band=None, *, out: bool = True
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Median-centred windows (float32) of the rows `rows` of `X`, their (sum, sum of squares), and their counts.
+    """Median-centered windows (float32) of the rows `rows` of `X`, their (sum, sum of squares), and their counts.
 
     The counts are the numbers of values outside the noise `band`, all 0 without a band. With `out=False`, the windows
     are not kept (the first array has no rows).

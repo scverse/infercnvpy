@@ -1,7 +1,7 @@
 """Interquartile range of the cell-cell Pearson correlations within a group, without the cells x cells matrix.
 
 `np.percentile(np.corrcoef(X), [75, 25])` takes quantiles over all n^2 entries of the correlation matrix: the n
-diagonal ones and every pair twice. Here the rows are standardized once (float32, centred, unit norm), the
+diagonal ones and every pair twice. Here the rows are standardized once (float32, centered, unit norm), the
 correlations of each block of rows with all later rows come from one BLAS product, and a parallel numba kernel
 adds that block's upper triangle to thread-local histograms with weight 2. The quantiles are read off the
 cumulative counts (linear interpolation inside a bin, then numpy's linear interpolation between ranks), which
@@ -34,7 +34,7 @@ TILE = 2048  # rows per block: a block of correlations is TILE x cells float32
 
 @njit_parallel
 def _standardize_dense(X, out):  # pragma: no cover
-    """Centre each row and scale it to unit norm; a constant row becomes NaN. `out` may be `X`."""
+    """Center each row and scale it to unit norm; a constant row becomes NaN. `out` may be `X`."""
     n, g = X.shape
     for i in prange(n):
         m = 0.0
@@ -84,7 +84,7 @@ def _sampled_corr(Z, rows, cols, out):  # pragma: no cover
 
 
 def _quantiles(hist: np.ndarray, qs: tuple[float, ...]) -> list[float]:
-    """Numpy's default (linear) quantiles of the values summarised by `hist` over [-1, 1]."""
+    """Numpy's default (linear) quantiles of the values summarized by `hist` over [-1, 1]."""
     n_bins = len(hist)
     cum = np.cumsum(hist)
     total = int(cum[-1])

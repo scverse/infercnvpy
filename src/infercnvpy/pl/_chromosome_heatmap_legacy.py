@@ -29,7 +29,7 @@ def legacy_heatmap(
     """Every cell as a row of :func:`scanpy.pl.heatmap`, in the original order within each group."""
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`adata.obsm['X_{use_rep}']`")
     obs = _as_df(adata.obs)
-    # an actual AnnData (not a view) that shares `uns`, so the colours scanpy picks are stored in `adata.uns`
+    # an actual AnnData (not a view) that shares `uns`, so the colors scanpy picks are stored in `adata.uns`
     order = _stable_group_order(AnnData(X=X, obs=obs, uns=adata.uns), groupby, kwargs.get("dendrogram", False))
     tmp_adata = AnnData(X=X[order], obs=obs.iloc[order], uns=adata.uns)
     values = X if isinstance(X, np.ndarray) else X.data
@@ -126,7 +126,7 @@ def _scanpy_heatmap(
 ) -> dict[str, Axes]:
     """Draw `tmp_adata` with :func:`scanpy.pl.heatmap`, with chromosome annotations.
 
-    The colour scale is centred at 0, from `vmin` to `vmax` (default `lo` and `hi`).
+    The color scale is centered at 0, from `vmin` to `vmax` (default `lo` and `hi`).
     """
     # re-sort, as saving & loading anndata destroys the order
     chr_pos_dict = dict(sorted(adata.uns[use_rep]["chr_pos"].items(), key=lambda x: x[1]))

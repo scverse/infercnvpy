@@ -2,7 +2,7 @@
 
 The cells are sorted by group and every group is split into contiguous runs of cells, one per pixel row
 (`pixel_rows`). A pixel row then shows either one cell of its run (`sampled_rows`: the cell in the middle, which is
-what matplotlib's nearest-neighbour downscaling shows when every cell is drawn) or the mean of the run (`binned_sums`:
+what matplotlib's nearest-neighbor downscaling shows when every cell is drawn) or the mean of the run (`binned_sums`:
 `_bin_sums_csr` / `_bin_sums_dense` add up the rows of each run straight from the matrix, CSR without densifying).
 A figure is ~1000 pixels tall, so the result is a small dense matrix whatever the number of cells.
 

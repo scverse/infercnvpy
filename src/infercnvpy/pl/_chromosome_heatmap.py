@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
 # Sizes in inches, as `scanpy.pl.heatmap` lays them out at figsize=(16, 10).
-_GROUP_W = 0.155  # colour blocks of the groups
+_GROUP_W = 0.155  # color blocks of the groups
 _CBAR_W = 0.155
 _DENDRO_W = 0.775
 _CHR_H = 0.115  # chromosome brackets
@@ -41,7 +41,7 @@ _PAD_W = 0.03
 _PAD_H = 0.05
 _CBAR_MAX_H = 4.0
 
-#: Colour bar label: infercnv, smooth_cnv and SCEVAN all report CNV relative to the reference cells.
+#: Color bar label: infercnv, smooth_cnv and SCEVAN all report CNV relative to the reference cells.
 CBAR_LABEL = "CNV (relative to reference)"
 
 
@@ -70,8 +70,8 @@ _HEATMAP_DOC = {
     """,
     "figure": """
         ax
-            Draw the heatmap into this axes (`mode="fast"` only). The group colours, chromosome labels, dendrogram and
-            colour bar go into axes split off from it.
+            Draw the heatmap into this axes (`mode="fast"` only). The group colors, chromosome labels, dendrogram and
+            color bar go into axes split off from it.
         n_jobs
             Number of threads for reading the CNV matrix (`mode="fast"`). `None` uses all cores.
         show
@@ -87,7 +87,7 @@ _HEATMAP_DOC = {
         Returns
         -------
         The figure if `return_fig` is true. Otherwise, if `show` is false, a dictionary of axes with the keys
-        `heatmap_ax`, `groupby_ax` (group colours), `gene_groups_ax` (chromosome labels), `colorbar_ax` (not with
+        `heatmap_ax`, `groupby_ax` (group colors), `gene_groups_ax` (chromosome labels), `colorbar_ax` (not with
         `mode="legacy"`) and, with `dendrogram`, `dendrogram_ax`.
     """,
 }
@@ -131,13 +131,13 @@ def chromosome_heatmap(
     aggregate
         What a pixel row shows when there are more cells than pixel rows (`mode="fast"` only). `"sample"` shows the
         cell in the middle of the cells that fall into the row, as the full-resolution plot downscaled with
-        nearest-neighbour interpolation, with the colour scale from the values of all cells. `"mean"` shows their
-        mean, with the colour scale from the range of the drawn (averaged) values unless `vmin` and `vmax` are
+        nearest-neighbor interpolation, with the color scale from the values of all cells. `"mean"` shows their
+        mean, with the color scale from the range of the drawn (averaged) values unless `vmin` and `vmax` are
         given.
     {figure}
     **kwargs
-        Arguments of :func:`scanpy.pl.heatmap`, see `mode`. By default, the colour scale is a
-        :class:`~matplotlib.colors.TwoSlopeNorm` centred at `vcenter=0`, with limits from the data. Pass the same
+        Arguments of :func:`scanpy.pl.heatmap`, see `mode`. By default, the color scale is a
+        :class:`~matplotlib.colors.TwoSlopeNorm` centered at `vcenter=0`, with limits from the data. Pass the same
         `vmin` and `vmax` to compare figures across modes, representations or datasets. `dendrogram=True` orders the
         groups as :func:`scanpy.tl.dendrogram` with its defaults clusters them (as `mode="legacy"`; with more windows
         than `scanpy.settings.N_PCS`, it clusters the groups' means of a PCA of all cells) and draws the dendrogram
@@ -213,8 +213,8 @@ def chromosome_heatmap_summary(
         {fast_args}
     {figure}
     **kwargs
-        Arguments of :func:`scanpy.pl.heatmap`, see `mode`. By default, the colour scale is a
-        :class:`~matplotlib.colors.TwoSlopeNorm` centred at `vcenter=0` from the smallest to the largest group mean.
+        Arguments of :func:`scanpy.pl.heatmap`, see `mode`. By default, the color scale is a
+        :class:`~matplotlib.colors.TwoSlopeNorm` centered at `vcenter=0` from the smallest to the largest group mean.
 
     {returns}
     """
@@ -391,7 +391,7 @@ def _categories(adata: AnnData, groupby: str) -> pd.Categorical:
 
 
 def _group_colors(adata: AnnData, groupby: str, n: int) -> list:
-    """The colours scanpy stores for `groupby`, or the default palette scanpy would pick."""
+    """The colors scanpy stores for `groupby`, or the default palette scanpy would pick."""
     colors = adata.uns.get(f"{groupby}_colors")
     if colors is not None and len(colors) >= n:
         return list(colors[:n])
@@ -418,7 +418,7 @@ def _group_means(X: Any, codes: np.ndarray, n_groups: int) -> np.ndarray:
 def _order_by_dendrogram(
     adata: AnnData, groupby: str, cat: pd.Categorical, palette: list, compute: Callable[[], dict[str, Any]]
 ) -> tuple[pd.Categorical, list, dict[str, Any] | None]:
-    """Reorder the categories (and their colours) as the leaves of the dendrogram of the non-empty groups.
+    """Reorder the categories (and their colors) as the leaves of the dendrogram of the non-empty groups.
 
     The dendrogram is `adata.uns[f"dendrogram_{groupby}"]` from :func:`scanpy.tl.dendrogram` if that has exactly
     these groups, otherwise `compute()`, which is stored there as `mode="legacy"` does. Unused categories go last.
@@ -493,7 +493,7 @@ def _draw(
 ) -> dict[str, Axes]:
     """Draw `values` (pixel rows x windows, `rows` rows per category of `cat`) with its annotations.
 
-    Cells run down the heatmap, or along it with `swap_axes`. `palette` has a colour per category, `dendro` the
+    Cells run down the heatmap, or along it with `swap_axes`. `palette` has a color per category, `dendro` the
     dendrogram of the non-empty groups in their order.
     """
     keep = np.flatnonzero(rows)
@@ -655,7 +655,7 @@ def _extent(proto: Text, text: str, renderer: RendererBase, *, along_x: bool) ->
 
 
 def _keep_labels(pos: np.ndarray, extent: np.ndarray, priority: np.ndarray) -> np.ndarray:
-    """Which labels (centred at `pos`, `extent` long) to draw so that none overlap: greedily, highest priority first.
+    """Which labels (centered at `pos`, `extent` long) to draw so that none overlap: greedily, highest priority first.
 
     Ties go to the earlier label. Labels that do not overlap any other are always drawn.
     """

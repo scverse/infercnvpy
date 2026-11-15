@@ -47,8 +47,8 @@ threads inside a dask task, with any scheduler: the scheduler's threads or proce
 numba's default threading layer on macOS aborts the process when it is used from several threads at once.
 
 :::{note}
-infercnv expects log-normalised expression (see {ref}`input-data`). For a dask array, {func}`scanpy.pp.normalize_total`
-and {func}`scanpy.pp.log1p` stay lazy. A backed AnnData cannot be normalised in place by scanpy, so normalise the data
+infercnv expects log-normalized expression (see {ref}`input-data`). For a dask array, {func}`scanpy.pp.normalize_total`
+and {func}`scanpy.pp.log1p` stay lazy. A backed AnnData cannot be normalized in place by scanpy, so normalize the data
 before you write the file.
 :::
 
@@ -56,7 +56,7 @@ before you write the file.
 
 Spatial technologies often produce tables with a lazy dask `X` of CSR blocks that are indexed by Ensembl ID. Next to
 the genes, such a table can contain control probes or codewords without a genomic position, which you remove before
-normalisation.
+normalization.
 
 ```python
 import anndata as ad
