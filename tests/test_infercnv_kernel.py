@@ -280,6 +280,27 @@ def test_csr_builder(preallocated):
     assert res.indptr.dtype == res.indices.dtype == np.int32
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("expm1", [False, True])
+def test_group_sums(dtype, expm1):
+    """Per chunk and group, the float64 sums of the rows (or of their `expm1`) in row order, CSR and dense alike."""
+    from infercnvpy.tl._infercnv_kernels import _group_sums_csr, _group_sums_dense
+
+    rng = np.random.default_rng(0)
+    D = (rng.random((300, 40)) * (rng.random((300, 40)) < 0.3) * 4).astype(dtype)
+    rows = np.sort(rng.choice(300, 200, replace=False)).astype(np.int64)
+    groups = rng.integers(0, 3, rows.size).astype(np.int64)
+    want = np.zeros((2, 3, 40))
+    for i, (r, g) in enumerate(zip(rows, groups, strict=True)):
+        x = D[r].astype(np.float64)
+        want[i * 2 // rows.size, g] += np.expm1(x) if expm1 else x
+    C = sp.csr_matrix(D)
+    for kernel, X in ((_group_sums_csr, (C.data, C.indices, C.indptr)), (_group_sums_dense, (D,))):
+        sums = np.zeros_like(want)
+        kernel(*X, rows, groups, expm1, sums)
+        np.testing.assert_array_equal(sums, want)
+
+
 @pytest.fixture(scope="module")
 def oligo_log(oligo):
     """The oligodendroglioma counts, log-normalised as infercnv expects (and as `min_mean` assumes)."""

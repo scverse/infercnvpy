@@ -78,14 +78,6 @@ def _blocks(X: Any) -> _Rows:
     return _Rows(X, max(X.shape[0], 1) if isinstance(X, np.ndarray) or sp.issparse(X) else CHUNKSIZE)
 
 
-def _each_block(source: _Rows, fn) -> None:
-    """Call `fn(X, row0, n_rows, start)` for every block of `source`, in order (backed and dask blocks read ahead)."""
-    blocks = list(range(source.n_blocks))
-    for i, (Xb, row0) in zip(blocks, source.read_ahead(blocks), strict=True):
-        s, e = int(source.bounds[i]), int(source.bounds[i + 1])
-        fn(Xb, row0, e - s, s)
-
-
 def binned_sums(X: Any, order: np.ndarray, bounds: np.ndarray) -> np.ndarray:
     """Sum of the rows of `X` in each run `order[bounds[b]:bounds[b + 1]]` (float64, runs x columns).
 
@@ -95,11 +87,9 @@ def binned_sums(X: Any, order: np.ndarray, bounds: np.ndarray) -> np.ndarray:
     sums = np.zeros((n_bins, X.shape[1]), dtype=np.float64)
     row_bin = np.full(X.shape[0], -1, dtype=np.int64)
     row_bin[order] = np.repeat(np.arange(n_bins), np.diff(bounds))
-    source = _blocks(X)
-
-    def add(Xb, row0, n, start):
-        local = np.flatnonzero(row_bin[start : start + n] >= 0)
-        b = row_bin[start + local]
+    for Xb, row0, s, e in _blocks(X).read_ahead():
+        local = np.flatnonzero(row_bin[s:e] >= 0)
+        b = row_bin[s + local]
         by_bin = np.argsort(b, kind="stable")
         bins, first = np.unique(b[by_bin], return_index=True)
         o = (row0 + local[by_bin]).astype(np.int64)
@@ -108,8 +98,6 @@ def binned_sums(X: Any, order: np.ndarray, bounds: np.ndarray) -> np.ndarray:
             _bin_sums_csr(Xb.indptr, Xb.indices, Xb.data, o, bnd, bins, sums)
         else:
             _bin_sums_dense(Xb, o, bnd, bins, sums)
-
-    _each_block(source, add)
     return sums
 
 
@@ -152,18 +140,14 @@ def sampled_rows(X: Any, picks: np.ndarray) -> tuple[np.ndarray, float, float]:
     out = np.empty((len(picks), X.shape[1]), dtype=np.float64)
     sorted_picks = np.argsort(picks, kind="stable")
     ranges = []
-
-    def take(Xb, row0, n, start):
-        values = Xb.data if sp.issparse(Xb) else Xb[row0 : row0 + n]
+    for Xb, row0, s, e in _blocks(X).read_ahead():
+        values = Xb.data if sp.issparse(Xb) else Xb[row0 : row0 + e - s]
         if values.size:
             ranges.append((np.nanmin(values), np.nanmax(values)))
-        lo, hi = np.searchsorted(picks[sorted_picks], [start, start + n])
+        lo, hi = np.searchsorted(picks[sorted_picks], [s, e])
         dest = sorted_picks[lo:hi]
-        rows = Xb[row0 + picks[dest] - start]
+        rows = Xb[row0 + picks[dest] - s]
         out[dest] = rows.toarray() if sp.issparse(rows) else rows
-
-    source = _blocks(X)
-    _each_block(source, take)
     if not ranges:
         return out, np.nan, np.nan
     return out, float(min(r[0] for r in ranges)), float(max(r[1] for r in ranges))

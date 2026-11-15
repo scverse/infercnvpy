@@ -111,10 +111,7 @@ def _abs_group_means(X, groups: pd.Series) -> dict[Any, np.number]:
     codes = pd.Index(uniq).get_indexer(groups)
     codes[pd.isna(groups.to_numpy())] = n  # cells without a group (a NaN group gets no cells, as in memory)
     sums = np.zeros(n + 1)
-    source = _Rows(X, 10_000)
-    blocks = list(range(source.n_blocks))
-    for i, (Xb, row0) in zip(blocks, source.read_ahead(blocks), strict=True):
-        s, e = int(source.bounds[i]), int(source.bounds[i + 1])
+    for Xb, row0, s, e in _Rows(X, 10_000).read_ahead():
         row_sums = np.asarray(abs(Xb[row0 : row0 + e - s]).sum(axis=1), dtype=np.float64).ravel()
         sums += np.bincount(codes[s:e], weights=row_sums, minlength=n + 1)
     counts = np.bincount(codes, minlength=n + 1)[:n] * X.shape[1]

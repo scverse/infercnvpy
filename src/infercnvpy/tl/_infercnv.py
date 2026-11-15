@@ -22,8 +22,6 @@ from infercnvpy.tl._infercnv_kernels import (
     _count_kept,
     _fill_kept,
     _gene_values,
-    _group_expm1_sums_csr,
-    _group_expm1_sums_dense,
     _group_sums_csr,
     _group_sums_dense,
     _n_unsorted_rows,
@@ -369,7 +367,6 @@ class _Layout:
         self.n_windows = n_windows
         g0s, gs, As, Bs, Ks, w0s = (np.array(x, dtype=np.int64) for x in zip(*geometry, strict=True))
         self.geometry = (g0s, gs, As, Bs, Ks, w0s, step)
-        self.step = step
         first, n_in, offset, length, ab = (np.concatenate(x).astype(np.int64) for x in zip(*scatter, strict=True))
         #: largest number of windows that contain one gene
         self.span = int(n_in.max())
@@ -652,12 +649,15 @@ class _Rows:
         `X` is an in-memory, kernel-ready matrix that holds the block.
         """
         blocks = list(self.blocks_of(rows))
-        for (i, local), (X, row0) in zip(blocks, self.read_ahead([i for i, _ in blocks]), strict=True):
-            s, e = int(self.bounds[i]), int(self.bounds[i + 1])
+        for (_, local), (X, row0, s, e) in zip(blocks, self.read_ahead([i for i, _ in blocks]), strict=True):
             yield X, row0 + (np.arange(e - s) if local is None else local)
 
-    def read_ahead(self, blocks: list[int]) -> Iterator[tuple[Any, int]]:
-        """`read` of each of `blocks`. Backed and dask blocks are read ahead in threads while earlier ones are used."""
+    def read_ahead(self, blocks: Sequence[int] | None = None) -> Iterator[tuple[Any, int, int, int]]:
+        """`read` of each of `blocks` (default: all), in order.
+
+        Backed and dask blocks are read ahead in threads while earlier ones are used.
+        """
+        blocks = range(self.n_blocks) if blocks is None else blocks
         if self.kind == "in memory" or len(blocks) < 2:
             yield from map(self.read, blocks)
             return
@@ -671,13 +671,13 @@ class _Rows:
             while ahead:
                 yield ahead.popleft().result()
 
-    def read(self, i: int) -> tuple[Any, int]:
-        """Block `i` as an in-memory, kernel-ready matrix, and the row of that matrix where the block starts."""
+    def read(self, i: int) -> tuple[Any, int, int, int]:
+        """`(X, row0, s, e)`: rows `s:e`, block `i`, are the rows from `row0` on of `X` (in memory, kernel-ready)."""
         s, e = int(self.bounds[i]), int(self.bounds[i + 1])
         if self.kind == "in memory":
-            return self.X, s
+            return self.X, s, s, e
         block = self.X.blocks[i].compute(scheduler="synchronous") if self.kind == "dask" else self.X[s:e]
-        return _kernel_ready(block), 0
+        return _kernel_ready(block), 0, s, e
 
 
 def _kernel_ready(X):
@@ -784,7 +784,7 @@ def _means(source: _Rows, codes: np.ndarray, n_groups: int, *, lazy: bool, expm1
         sums = np.sum(dask.compute(*tasks), axis=0)
     else:
         sums = np.zeros((n_groups, source.X.shape[1]))
-        for (i, local), (X, row0) in zip(blocks, source.read_ahead([i for i, _ in blocks]), strict=True):
+        for (i, local), (X, row0, _, _) in zip(blocks, source.read_ahead([i for i, _ in blocks]), strict=True):
             local, groups = _block_groups(source, i, local, codes)
             sums += _group_sums(X, row0 + local, groups, n_groups, expm1=expm1)
     counts = np.bincount(codes[codes >= 0], minlength=n_groups)
@@ -811,7 +811,7 @@ def _group_sums(X, rows: np.ndarray, groups: np.ndarray, n_groups: int, *, expm1
     """
     sums = np.zeros((n_kernel_chunks(len(rows), per_thread=1), n_groups, X.shape[1]))
     if sp.issparse(X):
-        (_group_expm1_sums_csr if expm1 else _group_sums_csr)(X.data, X.indices, X.indptr, rows, groups, sums)
+        _group_sums_csr(X.data, X.indices, X.indptr, rows, groups, expm1, sums)
     else:
-        (_group_expm1_sums_dense if expm1 else _group_sums_dense)(X, rows, groups, sums)
+        _group_sums_dense(X, rows, groups, expm1, sums)
     return sums.sum(axis=0)
