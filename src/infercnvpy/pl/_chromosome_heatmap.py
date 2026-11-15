@@ -125,7 +125,7 @@ def chromosome_heatmap(
         groups as :func:`scanpy.tl.dendrogram` with its defaults clusters them (as `mode="legacy"`; with more windows
         than `scanpy.settings.N_PCS`, it clusters the groups' means of a PCA of all cells) and draws the dendrogram
         next to the heatmap. A dendrogram stored in `adata.uns[f"dendrogram_{groupby}"]` is used if it has the same
-        groups.
+        groups; otherwise the computed one is stored there, as `mode="legacy"` does.
 
     Returns
     -------
@@ -146,7 +146,9 @@ def chromosome_heatmap(
     dendro, var_range = None, None
     with numba_threads(n_jobs):
         if opts.dendrogram:
-            cat, palette, dendro = _order_by_dendrogram(adata, groupby, cat, palette, lambda: _cell_dendrogram(X, cat))
+            cat, palette, dendro = _order_by_dendrogram(
+                adata, groupby, cat, palette, lambda: _dendrogram(X, cat, groupby)
+            )
         codes = cat.codes.astype(np.int64)
         order, bounds, rows = pixel_rows(codes, len(cat.categories), _n_pixel_rows(fig, ax, swap=opts.swap_axes))
         if aggregate == "sample":
@@ -247,8 +249,11 @@ def chromosome_heatmap_summary(
         present = np.flatnonzero(np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)))
         before = list(cat.categories[present])
         # as `mode="legacy"`: every group mean 10 times, the groups sorted as `astype("category")` sorts them
-        repeated = (np.repeat(means, 10, axis=0), pd.Categorical(np.repeat(before, 10)))
-        cat, palette, dendro = _order_by_dendrogram(adata, groupby, cat, palette, lambda: _scanpy_dendrogram(*repeated))
+        groups = pd.Categorical(np.repeat(before, 10))
+        by_name = means[[before.index(c) for c in groups.categories]]
+        cat, palette, dendro = _order_by_dendrogram(
+            adata, groupby, cat, palette, lambda: _dendrogram(np.repeat(means, 10, axis=0), groups, groupby, by_name)
+        )
         means = means[[before.index(c) for c in cat.categories if c in before]]
     rows = (np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)) > 0).astype(np.int64)
     norm = opts.color_norm(float(np.min(means)), float(np.max(means)))
@@ -440,44 +445,39 @@ def _order_by_dendrogram(
     """Reorder the categories (and their colours) as the leaves of the dendrogram of the non-empty groups.
 
     The dendrogram is `adata.uns[f"dendrogram_{groupby}"]` from :func:`scanpy.tl.dendrogram` if that has exactly
-    these groups, as for `mode="legacy"`, otherwise `compute()`. Unused categories go last. With fewer than two
-    groups, there is no dendrogram.
+    these groups, otherwise `compute()`, which is stored there as `mode="legacy"` does. Unused categories go last.
+    With fewer than two groups, there is no dendrogram.
     """
     present = np.flatnonzero(np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)))
     if len(present) < 2:
         return cat, palette, None
     labels = [str(c) for c in cat.categories[present]]
-    dendro = adata.uns.get(f"dendrogram_{groupby}", {}).get("dendrogram_info")
+    key = f"dendrogram_{groupby}"
+    dendro = adata.uns.get(key, {}).get("dendrogram_info")
     if dendro is None or sorted(map(str, dendro["ivl"])) != sorted(labels):
-        dendro = compute()
+        stored = compute()
+        if not adata.is_view:
+            adata.uns[key] = stored
+        dendro = stored["dendrogram_info"]
     dendro = {**dendro, "leaves": [labels.index(str(c)) for c in dendro["ivl"]]}
     new = [*present[dendro["leaves"]], *np.setdiff1d(np.arange(len(cat.categories)), present)]
     return cat.reorder_categories(cat.categories[new]), [palette[i] for i in new], dendro
 
 
-def _cell_dendrogram(X: Any, cat: pd.Categorical) -> dict[str, Any]:
-    """The dendrogram of the non-empty groups that :func:`scanpy.tl.dendrogram` computes from the cells (as legacy).
+def _dendrogram(X: Any, groups: pd.Categorical, groupby: str, means: np.ndarray | None = None) -> dict[str, Any]:
+    """What :func:`scanpy.tl.dendrogram` with its defaults stores for the rows of `X` grouped by `groups` (as legacy).
 
-    With more windows than `scanpy.settings.N_PCS`, scanpy clusters the groups' means of a PCA of all cells, which
-    for a lazy matrix comes from the covariance of the windows (`_pca_group_means`). Otherwise, it clusters the
-    group means.
+    `means` are the means of the non-empty groups in the order of the categories, if already known. With more
+    windows than `scanpy.settings.N_PCS`, scanpy clusters the groups' means of a PCA of all rows (`_pca_group_means`).
     """
-    groups = cat.remove_unused_categories()
-    lazy = _is_dask(X) or _is_backed(X)
-    if X.shape[1] > sc.settings.N_PCS and not lazy:
-        return _scanpy_dendrogram(X, groups)
-    means = _group_means(X, cat.codes.astype(np.int64), len(cat.categories))
+    if means is None:
+        means = _group_means(X, groups.codes.astype(np.int64), len(groups.categories))
     if X.shape[1] > sc.settings.N_PCS:
         means = _pca_group_means(X, means)
-    return _scanpy_dendrogram(means, pd.Categorical(groups.categories, categories=groups.categories))
-
-
-def _scanpy_dendrogram(X: Any, groups: pd.Categorical) -> dict[str, Any]:
-    """`dendrogram_info` of :func:`scanpy.tl.dendrogram` with its defaults, of the rows of `X` grouped by `groups`."""
-    obs = pd.DataFrame({"group": groups}, index=np.arange(len(groups)).astype(str))
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "You’re trying to run this on", UserWarning)  # that it uses a PCA
-        return sc.tl.dendrogram(AnnData(X, obs=obs), "group", inplace=False)["dendrogram_info"]
+    present = groups.remove_unused_categories().categories
+    obs = pd.DataFrame({groupby: pd.Categorical(present, categories=present)})
+    obs.index = obs.index.astype(str)
+    return sc.tl.dendrogram(AnnData(means, obs=obs), groupby, inplace=False)
 
 
 def _pca_group_means(X: Any, means: np.ndarray) -> np.ndarray:

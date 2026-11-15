@@ -132,13 +132,14 @@ def column_ranges(X: Any) -> tuple[np.ndarray, np.ndarray]:
 
 
 def gram(X: Any) -> tuple[np.ndarray, np.ndarray]:
-    """`X.T @ X` and the column sums of `X`, in float64."""
+    """`X.T @ X` and the column sums of `X`, in float64, `CHUNKSIZE` rows at a time."""
     G, sums = np.zeros((X.shape[1], X.shape[1])), np.zeros(X.shape[1])
 
     def add(Xb, row0, n, start):
-        rows = Xb[row0 : row0 + n].astype(np.float64)
-        G[:] += (rows.T @ rows).toarray() if sp.issparse(rows) else rows.T @ rows
-        sums[:] += np.asarray(rows.sum(axis=0)).ravel()
+        for s in range(row0, row0 + n, CHUNKSIZE):
+            rows = Xb[s : min(s + CHUNKSIZE, row0 + n)].astype(np.float64)
+            G[:] += (rows.T @ rows).toarray() if sp.issparse(rows) else rows.T @ rows
+            sums[:] += np.asarray(rows.sum(axis=0)).ravel()
 
     _each_block(_blocks(X), add)
     return G, sums

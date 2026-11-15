@@ -161,6 +161,7 @@ def test_dendrogram_from_mean_profiles(adata_small):
     tmp.obsm["X_cnv"], tmp.uns["cnv"] = tmp.X, adata_small.uns["cnv"]
     legacy = cnv.pl.chromosome_heatmap_summary(tmp, groupby="group", dendrogram=True, show=False, mode="legacy")
     expected = [t.get_text() for t in legacy["groupby_ax"].get_yticklabels()]
+    del adata_small.uns["dendrogram_group"]  # stored by the call above, and used by later ones
     summary = cnv.pl.chromosome_heatmap_summary(adata_small, groupby="group", dendrogram=True, show=False)
     assert [t.get_text() for t in summary["groupby_ax"].get_yticklabels()] == expected
     X, g = adata_small.obsm["X_cnv"].toarray(), adata_small.obs["group"]
@@ -192,6 +193,31 @@ def test_dendrogram_like_legacy_with_many_windows(fmt, seed, plot):
         warnings.simplefilter("error", UserWarning)  # not scanpy's warning that it falls back to a PCA
         fast = plot(adata, groupby="g", dendrogram=True, show=False)
     assert [t.get_text() for t in fast["groupby_ax"].get_yticklabels()] == expected
+
+
+@both_plots
+def test_dendrogram_is_stored_and_reused(plot, monkeypatch):
+    """The computed dendrogram is stored as `scanpy.tl.dendrogram` stores it, and later calls (also legacy) use it."""
+    adata = _many_windows(0)
+    first = plot(adata, groupby="g", dendrogram=True, show=False)
+    order = [t.get_text() for t in first["groupby_ax"].get_yticklabels()]
+    stored = adata.uns["dendrogram_g"]
+    tmp = AnnData(
+        np.random.default_rng(0).normal(size=(8, 3)),
+        obs=pd.DataFrame({"g": adata.obs["g"].cat.categories.astype("category")}),
+    )
+    assert set(stored) == set(sc.tl.dendrogram(tmp, "g", inplace=False))
+    assert stored["groupby"] == ["g"]
+    assert stored["categories_ordered"] == order
+
+    def fail(*args, **kwargs):
+        raise AssertionError("recomputed")
+
+    monkeypatch.setattr("infercnvpy.pl._chromosome_heatmap._dendrogram", fail)
+    monkeypatch.setattr(sc.tl, "dendrogram", fail)
+    for mode in ("fast", "legacy"):
+        again = plot(adata, groupby="g", dendrogram=True, show=False, mode=mode)
+        assert [t.get_text() for t in again["groupby_ax"].get_yticklabels()] == order
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"log": True}, {"aggregate": "mean"}])
