@@ -144,6 +144,8 @@ def detectability(
         * `group` (categorical), the cell type (`"all"` without `groupby`). Reference types get rows too, which show what a change
           in those cells would need;
         * `depth`, the median counts per cell of all cells (the target of `depth`);
+        * `depth_factor`, `depth` divided by the observed median counts per cell. Above 1 the rows are extrapolated,
+          and above 2 they are beyond the range that was checked (a warning says so);
         * `group_counts`, the median counts per cell of the group;
         * `arm` (ordered categorical, in genome order) and `chromosome`, the arm (`"chr1p"`, for example) and its
           chromosome;
@@ -159,7 +161,8 @@ def detectability(
           information);
         * the same four with the suffix `_ideal`, the counting bound without the null variance.
     `adata.uns[key_added]["params"]` : :class:`dict`
-        Parameters of this call, and `n_reference` (number of reference cells).
+        Parameters of this call, `observed_depth` (the median counts per cell of the data) and `n_reference` (number
+        of reference cells). With `inplace=False`, the same dictionary is in `table.attrs["params"]`.
     `adata.obs[f"{key_added}_information"]` : :class:`float`
         Per-cell information summed over arms at the observed depth, a measure of how much a cell can say about copy
         number.
@@ -268,6 +271,13 @@ def detectability(
     targets = [observed] if depth is None else np.asarray(depth, dtype=float).ravel().tolist()
     if not targets or not all(np.isfinite(t) and t > 0 for t in targets):
         raise ValueError(f"`depth` must be one or more positive numbers, got {depth!r}.")
+    if (far := max(targets) / observed) > 2:
+        warnings.warn(
+            f"`depth` goes up to {far:.1f} times the observed median of {observed:.0f} counts per cell. Beyond 2 times "
+            "the extrapolation is unchecked, so those rows are rough; expression data at least as deep is better.",
+            UserWarning,
+            skip_file_prefixes=SKIP_OWN_FRAMES,
+        )
 
     model = _Model(gene_arm, len(arms), group.codes.astype(np.int64), len(group.categories), is_ref)
     frames = []
@@ -288,9 +298,14 @@ def detectability(
                 fit = model.run(X, f)
                 null_var, source = _extrapolated(base, fit), "extrapolated"
             frames.append(
-                _table(fit, null_var, model, group, arms, target, source, at_n_cells, gain, loss, alpha, power)
+                _table(fit, null_var, model, group, arms, target, source, at_n_cells, gain, loss, alpha, power).assign(
+                    depth_factor=f
+                )
             )
     table = pd.concat(frames, ignore_index=True)
+    columns = list(table.columns)
+    columns.insert(columns.index("depth") + 1, columns.pop(columns.index("depth_factor")))
+    table = table[columns]
     _warn_unmeasured(table)
 
     n_ref = int(is_ref.sum())
@@ -309,6 +324,7 @@ def detectability(
         centromeres=centromeres if isinstance(centromeres, str) else dict(centromeres),
         exclude_chromosomes=exclude,
         random_state=random_state,
+        observed_depth=observed,
         n_reference=n_ref,
     )
     log_result("detectability", "%d arms with panel genes, %d reference cells", int((model.n_genes > 0).sum()), n_ref)
@@ -317,6 +333,7 @@ def detectability(
         adata.uns[key_added] = {"table": table, "params": params}
         adata.obs[f"{key_added}_information"] = base.cell_info
         return None
+    table.attrs["params"] = params
     return table
 
 

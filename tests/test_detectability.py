@@ -188,6 +188,12 @@ def test_depths():
     observed = np.median(adata.X.sum(axis=1).A1)
     df = _run(adata, depth=[observed / 2, observed, observed * 2])
     low, mid, high = (g for _, g in df.groupby("depth"))
+    assert low["depth_factor"].iloc[0] == pytest.approx(0.5)
+    assert high["depth_factor"].iloc[0] == pytest.approx(2.0)
+    assert list(df.columns[:3]) == ["group", "depth", "depth_factor"]
+    # the parameters travel with a returned table
+    assert df.attrs["params"]["depth"] == pytest.approx([observed / 2, observed, observed * 2])
+    assert df.attrs["params"]["observed_depth"] == pytest.approx(observed)
     assert set(low["null_var_source"]) == set(mid["null_var_source"]) == {"measured"}
     assert set(high["null_var_source"]) == {"extrapolated"}
     assert (low["cells_gain_ideal"] / mid["cells_gain_ideal"]).between(1.3, 2.3).all()
@@ -208,7 +214,9 @@ def test_extrapolated_null_variance():
     shallow = sim.adata(sim.counts(3000, 20, program=program))
     deep = sim.adata(sim.counts(3000, 200, program=program))
     target = np.median(deep.X.sum(axis=1).A1)
-    extrapolated = _run(shallow, depth=target)
+    with pytest.warns(UserWarning, match="times the observed median"):
+        extrapolated = _run(shallow, depth=target)
+    assert extrapolated["depth_factor"].iloc[0] > 2
     measured = _run(deep)
     assert set(extrapolated["null_var_source"]) == {"extrapolated"}
     ratio = extrapolated["cells_gain"] / measured["cells_gain"]
