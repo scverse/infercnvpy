@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import scipy.sparse as sp
+from anndata import AnnData
 from scipy.special import logsumexp
 
 import infercnvpy as cnv
@@ -252,6 +253,66 @@ def test_copy_number_reference_and_not_inplace():
     assert uns["baseline"] == "reference"
     assert _accuracy(adata, obs) >= 0.98
     assert "copy_number" not in adata.obs
+
+
+def test_copy_number_several_reference_types_stay_diploid():
+    """Reference cell types whose expression differs smoothly from the pooled reference stay diploid.
+
+    Six reference types: three share an "immune" smooth expression axis, three share a "stromal" axis with the
+    epithelial cells, half of which carry copy number changes. The diploid epithelial cells form a clone of their own
+    expression; the stromal reference types used to join it at high depth.
+    """
+    rng = np.random.default_rng(0)
+    n_chrom, genes, block = 12, 300, 40
+    G = n_chrom * genes
+    mu = rng.lognormal(-1, 1.2, G)
+
+    def smooth(sd, n=1):
+        return np.repeat(rng.normal(0, sd, (n, G // block + 1)), block, axis=1)[:, :G]
+
+    # type 0: epithelial, types 1-6: reference; 5% of genes 4x up or down per type, plus smooth expression axes
+    prog = np.log(np.where(rng.random((7, G)) < 0.05, rng.choice([0.25, 4.0], (7, G)), 1.0)) + smooth(0.1, 7)
+    immune, stromal = smooth(0.3)[0], smooth(0.3)[0]
+    prog[1:4] += immune
+    prog[4:] += 0.6 * stromal
+    prog[0] += stromal
+    cn = np.ones(G)  # chromosome arms cycle through loss, neutral and gain
+    for arm in range(2 * n_chrom):
+        cn[arm * genes // 2 : (arm + 1) * genes // 2] = (0.5, 1.0, 1.5)[arm % 3]
+    ctype = np.r_[np.zeros(600, int), np.repeat(np.arange(1, 7), 250)]
+    clone = np.r_[np.ones(300, bool), np.zeros(len(ctype) - 300, bool)]
+    lam = mu[None, :] * np.exp(prog[ctype]) * np.where(clone[:, None], cn[None, :], 1.0)
+    depth = np.where(ctype == 0, 8000, 4000) * rng.lognormal(0, 0.2, len(ctype))
+    lam *= (depth / lam.sum(axis=1))[:, None]
+    pos = np.tile(np.arange(genes) * (80_000_000 // genes) + 10_000, n_chrom)
+    var = pd.DataFrame(
+        {"chromosome": np.repeat([f"chr{i + 1}" for i in range(n_chrom)], genes), "start": pos, "end": pos + 5_000},
+        index=[f"g{i}" for i in range(G)],
+    )
+    obs = pd.DataFrame({"type": [f"t{t}" for t in ctype]}, index=[f"c{i}" for i in range(len(ctype))])
+    adata = AnnData(sp.csr_matrix(rng.poisson(lam).astype(np.float32)), obs=obs, var=var)
+    refs = [f"t{t}" for t in range(1, 7)]
+    obs, *_ = cnv.tl.copy_number(adata, reference_key="type", reference_cat=refs, inplace=False)
+    called = (obs["copy_number"] == "aneuploid").to_numpy()
+    assert called[clone].mean() > 0.95
+    assert called[ctype > 0].mean() < 0.02
+
+
+def test_type_priors_keep_reference_types_diploid():
+    """A nearly flat clone that matches the profile of every type takes the prior of normal types, but not of
+    reference types: their cells are known to be diploid (Atera epi_normal calibration, 69% of reference cells in such
+    a clone)."""
+    _, lay, _, _ = _layout(_simulate())
+    em = object.__new__(M._EM)
+    em.data = type("D", (), {"lay": lay})()
+    em.n_types = 3
+    em.ref_share = np.array([0.0, 1.0, 0.8])
+    flat = 0.1 * np.sin(np.arange(lay.n_genes) / 200.0)  # a weak smooth profile
+    em.type_blocks = np.array([M._block_medians(flat, lay)[0]] * 3)
+    pri = em.type_priors(np.array([np.zeros(lay.n_genes), flat]))
+    assert pri[0, 0] < 0.05  # a type without reference cells, fitted on the clone: the clone takes the prior
+    assert pri[1, 0] > 0.95  # a type of reference cells keeps the diploid prior
+    assert 0.75 < pri[2, 0] < 0.85  # 80% reference cells: at most 20% aneuploid prior
 
 
 def test_copy_number_reference_arguments():

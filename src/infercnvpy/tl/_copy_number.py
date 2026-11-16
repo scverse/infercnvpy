@@ -86,6 +86,7 @@ _FLAT_GAP = 0.15  # difference of the cluster means of group flatness that count
 _MARKER_FOLD = 5.0
 _MARKER_MIN = 1e-3  # share of counts in the markers above which a group can be marker-rich
 _MAX_SPILL = 0.5  # largest spillover fraction of tumour transcripts in a normal cell's diploid expectation
+_MIN_REF_SHARE = 0.9  # share of reference cells above which an expression type counts as normal
 _MIN_SEED = 3  # cells of the smallest group that can be the first diploid group (a rare normal population)
 _MIN_RESEED = 10  # cells of the smallest clone that can become the diploid clone later
 _MIN_SEG_GENES = 20  # genes of the shortest run that counts towards the burden; fewer on small panels
@@ -167,7 +168,10 @@ def copy_number(
         Layer with the raw counts. Default: `adata.X`.
     reference_key
         Column of `adata.obs` with annotations of normal cells. With `reference_cat`, these cells define the baseline.
-        Providing reference cells improves the detection of small clones on dense panels.
+        Expression types made of at least 90% reference cells keep their own smooth deviation from the baseline in their
+        diploid expectation, like the marker-rich types without a reference (see `normal_markers`), and the prior
+        probability of the aneuploid clones in a type is at most its share of non-reference cells. Providing reference
+        cells improves the detection of small clones on dense panels.
     reference_cat
         One or more values of `adata.obs[reference_key]` that annotate normal cells.
     exclude_chromosomes
@@ -399,8 +403,17 @@ def copy_number(
             normal, baseline_method, flat_gap = _seed(Yc, marker, total, groups, gcell, lay)
 
         em = _EM(data, hmm, gene_var, min_burden, clusters, Yc, Sc)
-        if is_ref is None and normal_markers is not None:
-            em.normal_type = _marker_types(Yc, marker / total, lay)
+        if is_ref is not None:
+            # types of at least 90% reference cells are normal: their diploid expectation keeps their smooth deviation
+            # from the pooled reference, as for marker-rich types. Without this, with several reference cell types,
+            # a reference type whose smooth deviation resembles another clone's profile joins that clone at depth.
+            # The spillover term stays off for them: with it, clone cells in these types lost calls. The share of
+            # reference cells also caps each type's aneuploid prior (`_EM.type_priors`).
+            n_ref = np.bincount(clusters, weights=normal, minlength=em.n_types)
+            em.ref_share = n_ref / np.bincount(clusters, minlength=em.n_types)
+            em.normal_type = em.ref_share >= _MIN_REF_SHARE
+        elif normal_markers is not None:
+            em.normal_type = em.spill_type = _marker_types(Yc, marker / total, lay)
             log.debug("copy_number: marker-rich expression types %s", np.flatnonzero(em.normal_type))
         frac = np.bincount(gcell, weights=normal, minlength=n_groups) / np.bincount(gcell, minlength=n_groups)
         lut = np.where(frac > 0.5, 0, 1 + np.arange(n_groups))
@@ -1022,6 +1035,8 @@ class _EM:
         self.types, self.Yt, self.St = np.ascontiguousarray(types, dtype=np.int64), Yt, St
         self.n_types = len(St)
         self.normal_type = np.zeros(len(St), dtype=bool)  # types whose diploid expectation keeps their smooth part
+        self.spill_type = np.zeros(len(St), dtype=bool)  # types whose diploid expectation has the spillover term
+        self.ref_share = np.zeros(len(St))  # share of reference cells per type: caps the aneuploid prior
         self.dosage = np.ones(Yt.shape[1])
         self.neutral = int(np.argmin(np.abs(hmm.means)))
         par = data.win_parity[data.gene_win]
@@ -1047,6 +1062,9 @@ class _EM:
         profiles (weights summing to at most 1, the rest is diploid). A type of normal cells has weights near 0 even
         when its expression differs from the baseline smoothly, a tumour type near 1, and a mixed type its tumour
         fraction. The fit uses the pooled profiles, not the current assignments, so it does not reinforce them.
+        Reference cells are known to be diploid, so the aneuploid weights of a type sum to at most its share of
+        non-reference cells: without the cap, a fit of a reference type's nearly flat profile on a nearly flat clone can
+        give that clone all the weight.
         """
         k = len(mu)
         pri = np.zeros((self.n_types, k))
@@ -1056,7 +1074,7 @@ class _EM:
             Mb = np.array([_block_medians(m, lay)[0] for m in mu[1:]]).T
             for t in range(self.n_types):
                 w = nnls(Mb, self.type_blocks[t])[0]
-                w = w / max(1.0, w.sum())
+                w = w * min(1.0, (1.0 - self.ref_share[t]) / max(w.sum(), 1e-12))
                 pri[t, 1:] = w
                 pri[t, 0] = 1.0 - w.sum()
         pri = np.maximum(pri, _MIN_PRIOR)
@@ -1099,7 +1117,7 @@ class _EM:
         share = np.empty((self.n_types, len(mu), len(wb)))
         for t in range(self.n_types):
             expo = self.dosage[None, :] * mu + self.e[t][None, :]
-            if self.normal_type[t]:  # marker-rich normal type: its diploid expectation keeps its smooth deviation
+            if self.normal_type[t]:  # normal type: its diploid expectation keeps its smooth deviation
                 expo[0] = expo[0] + self.type_smooth[t]
             share[t] = np.add.reduceat(self.b[None, :] * np.exp(expo), wb, axis=1)
         use = np.ones(len(wb), dtype=np.bool_) if windows is None else np.asarray(windows, dtype=np.bool_)
@@ -1117,7 +1135,7 @@ class _EM:
         tumour = (assign > 0).astype(data.Yw.dtype)
         g = (tumour @ data.Yw).astype(np.float64) * use if tumour.any() else np.zeros(len(wb))
         g = np.ascontiguousarray(g / max(g.sum(), 1e-12))
-        spill_ok = self.normal_type & bool(tumour.any())
+        spill_ok = self.spill_type & bool(tumour.any())
         with np.errstate(divide="ignore"):
             log_share = np.log(share)
         ll = np.empty((len(assign), len(mu)))
