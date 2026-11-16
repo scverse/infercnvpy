@@ -365,6 +365,8 @@ def test_copy_number_reference_arguments():
         ({"n_clusters": 0}, "n_clusters"),
         ({"max_fit_cells": 1}, "max_fit_cells"),
         ({"min_detection": 1.5}, "min_detection"),
+        ({"max_neighbour_weight": -0.1}, "max_neighbour_weight"),
+        ({"max_neighbour_weight": 1.0}, "max_neighbour_weight"),
     ],
 )
 def test_copy_number_argument_checks(kw, match):
@@ -534,7 +536,7 @@ def test_copy_number_neighbour_prior_tissue(seed):
     np.testing.assert_allclose(spatial[0]["copy_number_llr"], plain[0]["copy_number_llr"])
     assert ((s > 0.5) == (spatial[0]["copy_number"] == "aneuploid")).all()
     info = spatial[2]["spatial"]
-    assert info["converged"] and 0 < info["neighbour_weight"] <= M._NP_MAX_WEIGHT
+    assert info["converged"] and 0 < info["neighbour_weight"] <= 0.8
 
 
 def test_copy_number_neighbour_prior_without_reference():
@@ -581,7 +583,7 @@ def test_neighbour_prior_fixed_point_and_weight():
         lt[np.arange(n), clone] += 1.0  # weak evidence for the true clone
         resp = np.exp(lt + log_prior)
         resp /= resp.sum(axis=1, keepdims=True)
-        return resp, lt, *M._neighbour_prior(G, np.arange(n), resp, lt, log_prior, ref)
+        return resp, lt, *M._neighbour_prior(G, np.arange(n), resp, lt, log_prior, ref, 0.95)
 
     coherent = np.minimum((xy[:, 0] * k).astype(int), k - 1)  # three stripes
     resp, lt, q, info = run(coherent)
@@ -596,3 +598,22 @@ def test_neighbour_prior_fixed_point_and_weight():
     ref = rng.random(n) < 0.3
     resp, _, q, _ = run(coherent, ref)
     assert (q[ref, 1:].sum(axis=1) <= resp[ref, 1:].sum(axis=1) + 1e-12).all()
+
+
+@pytest.mark.parametrize("cap", [0.0, 0.3, 0.6])
+def test_copy_number_max_neighbour_weight(cap):
+    """`max_neighbour_weight=0` gives the per-cell results; otherwise the learnt weight stays at or below the cap."""
+    adata, *_ = _tissue(0)
+    kw = {"min_genes": 5, "n_jobs": 2, "inplace": False, "force_calls": True, "reference_key": "type"}
+    kw["reference_cat"] = "immune"
+    plain = cnv.tl.copy_number(adata, **kw)
+    spatial = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", max_neighbour_weight=cap, **kw)
+    info = spatial[2]["spatial"]
+    assert spatial[2]["params"]["max_neighbour_weight"] == cap
+    if cap == 0:
+        pd.testing.assert_frame_equal(plain[0], spatial[0], check_exact=True)
+        np.testing.assert_array_equal(plain[1], spatial[1])
+        assert info == {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}
+    else:
+        assert 0 < info["neighbour_weight"] <= cap
+        assert info["converged"]

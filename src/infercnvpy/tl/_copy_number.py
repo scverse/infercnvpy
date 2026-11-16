@@ -79,7 +79,6 @@ _MIN_CLONE = 5
 _EXACT_SVD = 10_000  # cells up to which the expression PCA uses an SVD (above: eigendecomposition)
 _DOSAGE_PRIOR = 1.0  # strength of the shrinkage of dosage weights towards 1, in median gene precisions
 _MIN_PRIOR = 0.01  # smallest prior clone probability of a cell type
-_NP_MAX_WEIGHT = 0.95  # largest weight of the neighbours in a cell's prior; the rest stays with its type's prior
 _NP_SWEEPS = 1000  # most updates of the spatial posteriors
 _NP_TOL = 1e-5  # largest change of a posterior at convergence
 _AMP_TUMOUR = 0.1  # smooth amplitude (log ratio) of an aneuploid clone's profile, see `_smooth_amplitude`
@@ -117,6 +116,7 @@ def copy_number(
     calculate_gene_values: bool = False,
     max_fit_cells: int | None = None,
     connectivity_key: str | None = None,
+    max_neighbour_weight: float = 0.8,
     force_calls: bool = False,
     bin_size: int = 1_000_000,
     chunksize: int = 5000,
@@ -246,6 +246,11 @@ def copy_number(
         other cells to 0 (see :func:`~infercnvpy.tl.smooth_cnv`). `copy_number_llr` stays the cell's own log
         likelihood ratio; `copy_number_score`, the labels, clones and profiles use the spatial posteriors.
         Default `None`: no spatial information.
+    max_neighbour_weight
+        Largest weight that a cell's neighbours get in its prior when `connectivity_key` is given; the weight itself is
+        estimated from the data, up to this value. A lower value lets a cell's own data count more, which reduces the
+        spread of calls into normal cells next to a tumour; a higher value smooths more, which helps in shallow data.
+        Between 0 and 1 (not included); 0 turns the spatial prior off, so the results are those of single cells.
     force_calls
         Call cells even where the data hold too little copy number information. With fewer than 1,000 genes passing
         the filters (small imaging panels) or a median below 150 counts per cell in those genes, the calls are not
@@ -328,12 +333,19 @@ def copy_number(
         Scale applied to the log likelihoods for the posterior.
     `adata.uns["copy_number"]["spatial"]` : :class:`dict`
         Only with `connectivity_key`: `neighbour_weight` (the estimated weight of the neighbours in each cell's prior,
-        0 to 0.95), `sweeps` (number of updates of the posteriors) and `converged`.
+        0 to `max_neighbour_weight`), `sweeps` (number of updates of the posteriors) and `converged`.
     `adata.uns["copy_number"]["params"]` : :class:`dict`
         Parameters of this call.
 
     When the cells are `"undetermined"`, `uns` holds `chr_pos`, `bins`, `window_start`, `window_end`, `params` and
     `undetermined` (the number of genes passing the filters and the median counts per cell in them).
+
+    Notes
+    -----
+    The default `max_neighbour_weight=0.8` lies between the values favoured by two tests in reference mode. On a breast
+    cancer section measured with the Xenium 5K panel, 0.5 called the fewest epithelial cells that calls on the whole
+    transcriptome found diploid. On simulated clones within one cell type, at a quarter of that section's counts, 0.95
+    found more cells at the edge of the clone than 0.5.
     """
     if not adata.var_names.is_unique:
         raise ValueError("Ensure your var_names are unique!")
@@ -346,6 +358,8 @@ def copy_number(
         chunksize=chunksize, n_clusters=n_clusters, max_fit_cells=max_fit_cells, min_detection=min_detection,
         segment_length=segment_length,
     )  # fmt: skip
+    if not 0 <= max_neighbour_weight < 1:
+        raise ValueError(f"`max_neighbour_weight` must be at least 0 and below 1, got {max_neighbour_weight}.")
     is_ref = _reference_cells(adata, reference_key, reference_cat)
     G = None if connectivity_key is None else _graph(adata, connectivity_key)
     if isinstance(normal_markers, Mapping):  # lists, so that the parameters can be written to h5ad/zarr
@@ -355,8 +369,8 @@ def copy_number(
         exclude_chromosomes=exclude_chromosomes, exclude_genes=exclude_genes, min_genes=min_genes,
         min_detection=min_detection, window_size=window_size, n_clusters=n_clusters, segment_length=segment_length,
         min_burden=min_burden, normal_markers=normal_markers, n_iter=n_iter, max_fit_cells=max_fit_cells,
-        connectivity_key=connectivity_key, force_calls=force_calls, bin_size=bin_size,
-        random_state=random_state,
+        connectivity_key=connectivity_key, max_neighbour_weight=max_neighbour_weight, force_calls=force_calls,
+        bin_size=bin_size, random_state=random_state,
     )  # fmt: skip
     rng = np.random.default_rng(random_state)
     expr = _as_matrix(adata.X if layer is None else adata.layers[layer], lazy=True)
@@ -486,7 +500,8 @@ def copy_number(
             resp, llr = em.assign_all(source, cells, data.project(source, cells), pcs, clusters, ref_all)
         spatial = None
         if G is not None and resp.shape[1] > 1:
-            resp, spatial = _neighbour_prior(G, cells, resp, *em.post_terms, None if is_ref is None else is_ref[cells])
+            ref_cells = None if is_ref is None else is_ref[cells]
+            resp, spatial = _neighbour_prior(G, cells, resp, *em.post_terms, ref_cells, max_neighbour_weight)
         k = resp.shape[1]
         p_an = resp[:, 1:].sum(axis=1)
         clone = np.where(p_an > 0.5, 1 + resp[:, 1:].argmax(axis=1), 0) if k > 1 else np.zeros(n, dtype=np.int64)
@@ -635,7 +650,7 @@ def _reference_cells(adata, reference_key, reference_cat) -> np.ndarray | None:
     return np.isin(values, _categories(reference_cat))
 
 
-def _neighbour_prior(G, cells, resp, lt, log_prior, ref):
+def _neighbour_prior(G, cells, resp, lt, log_prior, ref, max_weight):
     """Posteriors with a spatial prior: each cell's prior mixes its type's prior with its neighbours' posteriors.
 
     For cell i with tempered likelihoods `L_i(c) = exp(lt_i(c))` and type prior `pi_i(c)`, the posterior is
@@ -643,8 +658,11 @@ def _neighbour_prior(G, cells, resp, lt, log_prior, ref):
     posteriors `q_j` (i itself excluded). `lam` maximises the pseudo-likelihood `sum_i log sum_c L_i(c) * prior_i(c)`
     with `m_i` from the per-cell posteriors (concave in `lam`); then damped synchronous updates run to a fixed point.
     With `ref`, edges between reference and other cells are dropped, and reference cells use the diploid clone as
-    `m_i`. Cells without neighbours keep their per-cell posterior `resp`. Returns the posteriors and a summary dict.
+    `m_i`. `lam` is at most `max_weight`; with 0 or without neighbours, cells keep their per-cell posterior `resp`.
+    Returns the posteriors and a summary dict.
     """
+    if max_weight <= 0:
+        return resp, {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}
     n, k = lt.shape
     G = G[cells][:, cells].tocsr()
     G.setdiag(0)
@@ -658,8 +676,8 @@ def _neighbour_prior(G, cells, resp, lt, log_prior, ref):
     q = resp.copy()  # = lik * base, normalised
     deg = np.asarray(G.sum(axis=1)).ravel()
     fixed = deg <= 0 if ref is None else (deg <= 0) | ref
-    lam = _neighbour_weight(G, deg, lik, base, q, ~fixed)
-    if ref is not None and ref.any():  # declared diploid: the neighbours' state is the diploid clone
+    lam = _neighbour_weight(G, deg, lik, base, q, ~fixed, max_weight)
+    if ref is not None and ref.any() and lam > 0:  # declared diploid: the neighbours' state is the diploid clone
         pr = (1.0 - lam) * base[ref]
         pr[:, 0] += lam
         q[ref] = lik[ref] * pr / (lik[ref] * pr).sum(axis=1, keepdims=True)
@@ -679,11 +697,11 @@ def _neighbour_prior(G, cells, resp, lt, log_prior, ref):
     return q, {"neighbour_weight": float(lam), "sweeps": sweep, "converged": bool(converged)}
 
 
-def _neighbour_weight(G, deg, lik, base, q, free) -> float:
+def _neighbour_weight(G, deg, lik, base, q, free, max_weight) -> float:
     """Weight `lam` of the neighbours in the prior that maximises `sum_i log sum_c L_i(c) ((1-lam) pi_i + lam m_i)`.
 
     The objective is a sum of logs of functions linear in `lam`, so it is concave; its derivative falls
-    monotonically, and bisection finds the root in [0, `_NP_MAX_WEIGHT`].
+    monotonically, and bisection finds the root in [0, `max_weight`].
     """
     if not free.any():
         return 0.0
@@ -696,9 +714,9 @@ def _neighbour_weight(G, deg, lik, base, q, free) -> float:
 
     if slope(0.0) <= 0:
         return 0.0
-    if slope(_NP_MAX_WEIGHT) >= 0:
-        return _NP_MAX_WEIGHT
-    lo, hi = 0.0, _NP_MAX_WEIGHT
+    if slope(max_weight) >= 0:
+        return max_weight
+    lo, hi = 0.0, max_weight
     for _ in range(60):
         mid = 0.5 * (lo + hi)
         lo, hi = (mid, hi) if slope(mid) > 0 else (lo, mid)
