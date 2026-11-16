@@ -165,16 +165,17 @@ def copy_number(
     .. warning::
         With reference cells, weak clones in shallow data can be called diploid. After each pass, an aneuploid clone
         whose profile has a smooth amplitude below 0.1 merges into the diploid clone, and in shallow data a clone that
-        mixes tumour and normal cells can stay below that cut. On an Atera breast cancer Xenium 5K panel cut thinned to
-        a quarter of its counts, a run with an immune and stromal reference called no cell aneuploid, while the
-        reference-free run called 87% of the epithelial cells. When a run with reference cells calls few or no cells,
-        run without a reference as well and compare the two.
+        mixes tumour and normal cells can stay below that cut. On a breast cancer section measured on the whole
+        transcriptome, reduced to the genes of the Xenium 5K panel and thinned to a quarter of its counts, a run with an
+        immune and stromal reference called no cell aneuploid, while the reference-free run called 87% of the epithelial
+        cells. When a run with reference cells calls few or no cells, run without a reference as well and compare the
+        two.
 
         Every normal cell type in the sample belongs in the reference, including stromal cells such as smooth muscle
         cells and pericytes. A normal cell type left out of the reference can form clones from the smooth part of its
-        expression difference to the reference, and normal cells of other types can join those clones. In an Atera
-        breast cancer section with smooth muscle cells left out of the reference, the normal epithelium was called
-        diploid with one k-means seed and 89% aneuploid with another.
+        expression difference to the reference, and normal cells of other types can join those clones. In the same
+        section with smooth muscle cells left out of the reference, the normal epithelium was called diploid with one
+        k-means seed and 89% aneuploid with another.
 
     Parameters
     ----------
@@ -299,12 +300,12 @@ def copy_number(
         or doublets with tumour cells; for cells of normal types (marker-rich types, or reference types), up to 0.5 of
         this mixture is part of the diploid expectation, so that spillover alone does not make them aneuploid.
     `adata.obsm["X_copy_number"]` : :class:`numpy.ndarray`
-        Copy number log ratios (float32), cells x genomic bins: the posterior mixture of the clones' segment means, a
-        continuous score. Cells that are `"not.defined"` or `"undetermined"` have 0 (no copy number change), so that
-        embeddings, smoothing and heatmaps work on all cells, as with :func:`~infercnvpy.tl.infercnv`.
+        Copy number log ratios (natural log, float32), cells x genomic bins: the posterior mixture of the clones'
+        segment means, a continuous score. Cells that are `"not.defined"` or `"undetermined"` have 0 (no copy number
+        change), so that embeddings, smoothing and heatmaps work on all cells, as with :func:`~infercnvpy.tl.infercnv`.
     `adata.layers["gene_values_copy_number"]` : :class:`numpy.ndarray`
-        Only if `calculate_gene_values=True`: log ratio per gene (float32), as `X_copy_number`; `NaN` for genes
-        removed by the filters.
+        Only if `calculate_gene_values=True`: log ratio per gene (natural log, float32), as `X_copy_number`; `NaN` for
+        genes removed by the filters.
     `adata.uns["copy_number"]["chr_pos"]` : :class:`dict`
         Maps each chromosome to the column of `X_copy_number` where it starts.
     `adata.uns["copy_number"]["bins"]` : :class:`pandas.DataFrame`
@@ -315,11 +316,11 @@ def copy_number(
         Per clone: `n_cells`, `aneuploid`, `amplitude` (smooth amplitude of its profile) and `burden` (fraction of
         genes in long non-neutral segments).
     `adata.uns["copy_number"]["clone_profiles"]` : :class:`pandas.DataFrame`
-        Log ratio of each clone in each bin.
+        Log ratio (natural log) of each clone in each bin.
     `adata.uns["copy_number"]["segments"]` : :class:`pandas.DataFrame`
-        Segments of the aneuploid clones: `clone`, `chromosome`, `start`, `end`, `n_genes`, `log_ratio` with a 95%
-        interval (`ci_low`, `ci_high`), `state_ratio` (copy ratio of the HMM state) and `p_neutral` (mean posterior
-        probability of the neutral state).
+        Segments of the aneuploid clones: `clone`, `chromosome`, `start`, `end`, `n_genes`, `log_ratio` (natural log)
+        with a 95% interval (`ci_low`, `ci_high`), `state_ratio` (copy ratio of the HMM state) and `p_neutral` (mean
+        posterior probability of the neutral state).
     `adata.uns["copy_number"]["genes"]` : :class:`pandas.DataFrame`
         The genes used, in genomic order, with their `dosage` weight (1: expression follows copy number fully; the
         final likelihood uses these weights).
@@ -343,9 +344,9 @@ def copy_number(
     Notes
     -----
     The default `max_neighbour_weight=0.8` lies between the values favoured by two tests in reference mode. On a breast
-    cancer section measured with the Xenium 5K panel, 0.5 called the fewest epithelial cells that calls on the whole
-    transcriptome found diploid. On simulated clones within one cell type, at a quarter of that section's counts, 0.95
-    found more cells at the edge of the clone than 0.5.
+    cancer section measured with the Xenium 5K panel, 0.5 called the fewest aneuploid cells among the epithelial cells
+    that whole-transcriptome calls found diploid. On simulated clones within one cell type, at a quarter of that
+    section's counts, 0.95 found more cells at the edge of the clone than 0.5.
     """
     if not adata.var_names.is_unique:
         raise ValueError("Ensure your var_names are unique!")
