@@ -195,6 +195,21 @@ def smooth_cnv(
     weight means a closer neighbor). Distances, e.g. `obsp["spatial_distances"]`, give the
     farthest neighbors the largest weight and are rejected.
 
+    A normal cell next to a tumor cell shares no copy number change with it, so smoothing over the full graph spreads
+    tumor signal into immune and stromal cells at the tumor edge and dilutes the tumor cells there. When the normal
+    cells are annotated (e.g. the reference cells of :func:`infercnvpy.tl.infercnv`), drop the edges between them and
+    the other cells; entries set to 0 are not edges. Edges among the normal cells stay, so that they are smoothed as
+    much as the other cells and a threshold set on them still fits::
+
+        G = adata.obsp["spatial_connectivities"].tocsr(copy=True)
+        normal = adata.obs["cell_type"].isin(["immune", "endothelial", "fibroblast"]).to_numpy()
+        G.data *= normal[np.repeat(np.arange(G.shape[0]), np.diff(G.indptr))] == normal[G.indices]
+        adata.obsp["spatial_connectivities_masked"] = G
+        cnv.tl.smooth_cnv(adata, connectivity_key="spatial_connectivities_masked")
+
+    Use two groups, normal and the rest, rather than one group per cell type, so that tumor cells annotated as
+    different types still share edges. No mask separates normal cells from tumor cells of the same type.
+
     Parameters
     ----------
     adata

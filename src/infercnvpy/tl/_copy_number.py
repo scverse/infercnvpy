@@ -29,7 +29,7 @@ from infercnvpy._numba import n_kernel_chunks, numba_threads
 from infercnvpy._util import _as_matrix, _params_for_uns
 from infercnvpy.tl import _copy_number_kernels as K
 from infercnvpy.tl._infercnv import _categories, _natural_sort, _Rows
-from infercnvpy.tl._spatial import _graph, _smooth
+from infercnvpy.tl._spatial import _graph
 
 #: Cell-cycle genes of Tirosh et al. 2016 (S and G2/M phase), with the current symbols of renamed genes added.
 CELL_CYCLE_GENES = (
@@ -79,6 +79,9 @@ _MIN_CLONE = 5
 _EXACT_SVD = 10_000  # cells up to which the expression PCA uses an SVD (above: eigendecomposition)
 _DOSAGE_PRIOR = 1.0  # strength of the shrinkage of dosage weights towards 1, in median gene precisions
 _MIN_PRIOR = 0.01  # smallest prior clone probability of a cell type
+_NP_MAX_WEIGHT = 0.95  # largest weight of the neighbours in a cell's prior; the rest stays with its type's prior
+_NP_SWEEPS = 1000  # most updates of the spatial posteriors
+_NP_TOL = 1e-5  # largest change of a posterior at convergence
 _AMP_TUMOUR = 0.1  # smooth amplitude (log ratio) of an aneuploid clone's profile, see `_smooth_amplitude`
 _N_PASSES = 4
 _RESEED_GAP = 0.05  # how much flatter than the diploid clone another clone must be to restart the passes from it
@@ -114,7 +117,6 @@ def copy_number(
     calculate_gene_values: bool = False,
     max_fit_cells: int | None = None,
     connectivity_key: str | None = None,
-    n_hops: int = 1,
     force_calls: bool = False,
     bin_size: int = 1_000_000,
     chunksize: int = 5000,
@@ -226,20 +228,24 @@ def copy_number(
         large datasets; results can differ from the default, which fits on all cells. Use tens of thousands of cells: with a few thousand or fewer, the
         diploid baseline and the clones can change from those of the full fit.
     connectivity_key
-        Smooth the results over a spatial neighbour graph, the cells x cells graph `adata.obsp[connectivity_key]`
-        (e.g. `"spatial_connectivities"` from :func:`squidpy.gr.spatial_neighbors_knn`), as
-        :func:`~infercnvpy.tl.smooth_cnv` does for a CNV matrix. Each cell's posterior clone probabilities and llr
-        become the mean over the cell and its neighbours (weighted by the graph); labels, clones and profiles follow
-        from the smoothed posteriors with the same rules. On imaging data, where single cells hold few counts and
-        neighbours usually share their clone, this lowers the errors inside clones and the false calls in normal
-        tissue, at the cost of blurring the boundary between clones by about `n_hops` neighbours. About 10 neighbours
-        (`squidpy.gr.spatial_neighbors_knn(adata, n_neighs=10)`) kept boundaries best on simulated clones; 100
-        blurred them more than no smoothing. Across cell types, smoothing also spreads tumour calls into the normal
-        cells next to a tumour. To avoid that, set the graph's entries between cells of different types to 0; this
-        suits tumours that follow a cell type, while the full graph suits clones that span types.
-        Default `None`: no smoothing.
-    n_hops
-        Number of smoothing steps over the graph of `connectivity_key`; each step reaches one more edge away.
+        Let each cell's spatial neighbours inform its clone, with the cells x cells graph `adata.obsp[connectivity_key]`
+        (e.g. `"spatial_connectivities"` from :func:`squidpy.gr.spatial_neighbors_knn`; any graph with non-negative
+        weights works, and entries set to 0 are not edges). The prior of a cell over the clones becomes a mixture of
+        its type's prior and the weighted mean of its neighbours' posteriors (the cell itself left out); the mixing
+        weight is estimated from the data by maximising the likelihood of each cell given its neighbours, and the
+        posteriors are updated until they no longer change. A cell with strong evidence of its own keeps its call, a
+        cell with little evidence follows its neighbourhood, and a cell without neighbours keeps its per-cell
+        posterior. On imaging data, where single cells hold few counts and neighbours usually share their clone, this
+        lowers the errors inside clones. About 10 neighbours
+        (`squidpy.gr.spatial_neighbors_knn(adata, n_neighs=10)`) is a good start.
+
+        With `reference_key`, edges between reference and other cells are dropped: a reference cell says nothing about
+        the copy number of a tumour cell next to it, and the other way round. Reference cells take the diploid clone
+        as their neighbours' state, so their probability of being aneuploid can only go down. Without a reference, use
+        the same split with your own annotation by setting the graph's entries between known normal cells and the
+        other cells to 0 (see :func:`~infercnvpy.tl.smooth_cnv`). `copy_number_llr` stays the cell's own log
+        likelihood ratio; `copy_number_score`, the labels, clones and profiles use the spatial posteriors.
+        Default `None`: no spatial information.
     force_calls
         Call cells even where the data hold too little copy number information. With fewer than 1,000 genes passing
         the filters (small imaging panels) or a median below 150 counts per cell in those genes, the calls are not
@@ -320,6 +326,9 @@ def copy_number(
         a warning says that the baseline is uncertain.
     `adata.uns["copy_number"]["temperature"]` : :class:`float`
         Scale applied to the log likelihoods for the posterior.
+    `adata.uns["copy_number"]["spatial"]` : :class:`dict`
+        Only with `connectivity_key`: `neighbour_weight` (the estimated weight of the neighbours in each cell's prior,
+        0 to 0.95), `sweeps` (number of updates of the posteriors) and `converged`.
     `adata.uns["copy_number"]["params"]` : :class:`dict`
         Parameters of this call.
 
@@ -333,7 +342,7 @@ def copy_number(
             "Genomic positions not found. There need to be `chromosome`, `start`, and `end` columns in `adata.var`."
         )
     _check_args(
-        window_size=window_size, min_genes=min_genes, n_iter=n_iter, n_hops=n_hops, bin_size=bin_size,
+        window_size=window_size, min_genes=min_genes, n_iter=n_iter, bin_size=bin_size,
         chunksize=chunksize, n_clusters=n_clusters, max_fit_cells=max_fit_cells, min_detection=min_detection,
         segment_length=segment_length,
     )  # fmt: skip
@@ -346,7 +355,7 @@ def copy_number(
         exclude_chromosomes=exclude_chromosomes, exclude_genes=exclude_genes, min_genes=min_genes,
         min_detection=min_detection, window_size=window_size, n_clusters=n_clusters, segment_length=segment_length,
         min_burden=min_burden, normal_markers=normal_markers, n_iter=n_iter, max_fit_cells=max_fit_cells,
-        connectivity_key=connectivity_key, n_hops=n_hops, force_calls=force_calls, bin_size=bin_size,
+        connectivity_key=connectivity_key, force_calls=force_calls, bin_size=bin_size,
         random_state=random_state,
     )  # fmt: skip
     rng = np.random.default_rng(random_state)
@@ -475,8 +484,9 @@ def copy_number(
         if n_fit < n:  # assign every cell with the fitted model, in one pass over the counts
             ref_all = None if is_ref is None else is_ref[cells]
             resp, llr = em.assign_all(source, cells, data.project(source, cells), pcs, clusters, ref_all)
-        if G is not None:
-            resp, llr = _smooth_posteriors(G, cells, n_hops, resp, llr)
+        spatial = None
+        if G is not None and resp.shape[1] > 1:
+            resp, spatial = _neighbour_prior(G, cells, resp, *em.post_terms, None if is_ref is None else is_ref[cells])
         k = resp.shape[1]
         p_an = resp[:, 1:].sum(axis=1)
         clone = np.where(p_an > 0.5, 1 + resp[:, 1:].argmax(axis=1), 0) if k > 1 else np.zeros(n, dtype=np.int64)
@@ -521,6 +531,8 @@ def copy_number(
         "temperature": em.tau,
         "params": params,
     }
+    if spatial is not None:
+        uns["spatial"] = spatial
     calls = np.where(p_an > 0.5, LABELS[0], LABELS[1])
     n_an = int((p_an > 0.5).sum())
     log_result(
@@ -623,16 +635,74 @@ def _reference_cells(adata, reference_key, reference_cat) -> np.ndarray | None:
     return np.isin(values, _categories(reference_cat))
 
 
-def _smooth_posteriors(G, cells, n_hops, resp, llr):
-    """Posteriors and llr averaged over each cell and its neighbours in `G` (as in `tl.smooth_cnv`).
+def _neighbour_prior(G, cells, resp, lt, log_prior, ref):
+    """Posteriors with a spatial prior: each cell's prior mixes its type's prior with its neighbours' posteriors.
 
-    The graph is restricted to the cells that pass the filters; cells without neighbours keep their values.
+    For cell i with tempered likelihoods `L_i(c) = exp(lt_i(c))` and type prior `pi_i(c)`, the posterior is
+    `q_i(c) ~ L_i(c) * ((1 - lam) * pi_i(c) + lam * m_i(c))`, where `m_i` is the weighted mean of the neighbours'
+    posteriors `q_j` (i itself excluded). `lam` maximises the pseudo-likelihood `sum_i log sum_c L_i(c) * prior_i(c)`
+    with `m_i` from the per-cell posteriors (concave in `lam`); then damped synchronous updates run to a fixed point.
+    With `ref`, edges between reference and other cells are dropped, and reference cells use the diploid clone as
+    `m_i`. Cells without neighbours keep their per-cell posterior `resp`. Returns the posteriors and a summary dict.
     """
+    n, k = lt.shape
     G = G[cells][:, cells].tocsr()
     G.setdiag(0)
+    if ref is not None:
+        rows = np.repeat(np.arange(n), np.diff(G.indptr))
+        G.data = G.data * (ref[rows] == ref[G.indices])
     G.eliminate_zeros()
-    out = _smooth(G, np.column_stack([resp, llr]), None, n_hops, dtype=np.float64)
-    return out[:, :-1], out[:, -1]
+    lik = np.exp(lt - lt.max(axis=1, keepdims=True))
+    base = np.exp(log_prior)
+    base /= base.sum(axis=1, keepdims=True)
+    q = resp.copy()  # = lik * base, normalised
+    deg = np.asarray(G.sum(axis=1)).ravel()
+    fixed = deg <= 0 if ref is None else (deg <= 0) | ref
+    lam = _neighbour_weight(G, deg, lik, base, q, ~fixed)
+    if ref is not None and ref.any():  # declared diploid: the neighbours' state is the diploid clone
+        pr = (1.0 - lam) * base[ref]
+        pr[:, 0] += lam
+        q[ref] = lik[ref] * pr / (lik[ref] * pr).sum(axis=1, keepdims=True)
+    indptr, indices, w = G.indptr, G.indices, G.data.astype(np.float64)
+    out = np.empty_like(q)
+    converged, sweep = lam == 0.0 or (~fixed).sum() == 0, 0
+    while not converged and sweep < _NP_SWEEPS:
+        K.neighbour_prior_sweep(indptr, indices, w, lik, base, lam, fixed, q, out)
+        out = 0.5 * (q + out)  # damping: same fixed point, no oscillation between neighbours
+        delta = float(np.abs(out - q).max())
+        q, out = out, q
+        sweep += 1
+        converged = delta < _NP_TOL
+    if not converged:
+        log.warning("copy_number: the spatial posteriors did not converge in %d sweeps", sweep)
+    log.debug("copy_number: neighbour weight %.3f, %d sweeps", lam, sweep)
+    return q, {"neighbour_weight": float(lam), "sweeps": sweep, "converged": bool(converged)}
+
+
+def _neighbour_weight(G, deg, lik, base, q, free) -> float:
+    """Weight `lam` of the neighbours in the prior that maximises `sum_i log sum_c L_i(c) ((1-lam) pi_i + lam m_i)`.
+
+    The objective is a sum of logs of functions linear in `lam`, so it is concave; its derivative falls
+    monotonically, and bisection finds the root in [0, `_NP_MAX_WEIGHT`].
+    """
+    if not free.any():
+        return 0.0
+    m = np.asarray(G[free] @ q) / deg[free, None]
+    a = (lik[free] * base[free]).sum(axis=1)
+    r = (lik[free] * (m - base[free])).sum(axis=1) / np.maximum(a, 1e-300)
+
+    def slope(x):
+        return float((r / (1.0 + x * r)).sum())
+
+    if slope(0.0) <= 0:
+        return 0.0
+    if slope(_NP_MAX_WEIGHT) >= 0:
+        return _NP_MAX_WEIGHT
+    lo, hi = 0.0, _NP_MAX_WEIGHT
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if slope(mid) > 0 else (lo, mid)
+    return 0.5 * (lo + hi)
 
 
 def _row_blocks(source: _Rows, rows: np.ndarray):
@@ -1194,7 +1264,8 @@ class _EM:
     def posterior(self, ll, types):
         """Posterior clone probabilities (temperature-scaled likelihoods, type priors) and the unscaled llr."""
         llr = ll[:, 1:].max(axis=1) - ll[:, 0] if ll.shape[1] > 1 else np.zeros(len(ll))
-        ll = self.tau * ll + np.log(self.priors)[types]
+        self.post_terms = (self.tau * ll, np.log(self.priors)[types])  # for the spatial prior
+        ll = self.post_terms[0] + self.post_terms[1]
         resp = np.exp(ll - ll.max(axis=1, keepdims=True))
         return resp / resp.sum(axis=1, keepdims=True), llr
 

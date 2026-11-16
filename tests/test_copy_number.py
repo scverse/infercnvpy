@@ -365,7 +365,6 @@ def test_copy_number_reference_arguments():
         ({"n_clusters": 0}, "n_clusters"),
         ({"max_fit_cells": 1}, "max_fit_cells"),
         ({"min_detection": 1.5}, "min_detection"),
-        ({"n_hops": 0}, "n_hops"),
     ],
 )
 def test_copy_number_argument_checks(kw, match):
@@ -478,37 +477,122 @@ def test_copy_number_warns_when_all_diploid(caplog):
     assert "reference cells" in caplog.text
 
 
-@pytest.mark.parametrize("seed", [3, 4])
-def test_copy_number_spatial_smoothing(seed):
-    """Tumour cells in one half of the tissue: smoothing the posteriors over 10 neighbours keeps the calls, does not
-    lower them away from the boundary, labels follow the smoothed posterior, and graphs without (real) edges change
-    nothing."""
-    adata = _simulate(n_tumour=600, n_normal=600, depth=200, normal_depth=1.0, seed=seed)
+def _tissue(seed, depth=100, n=2000, n_chrom=6, genes=400):
+    """A disc of tumour epithelium in normal epithelium, with reference (immune) cells everywhere (35%)."""
     rng = np.random.default_rng(seed)
-    tumour = (adata.obs["truth"] == "tumour").to_numpy()
-    xy = rng.random((adata.n_obs, 2))
-    xy[:, 0] = np.where(tumour, xy[:, 0] * 0.5, 0.5 + xy[:, 0] * 0.5)
-    interior = np.abs(xy[:, 0] - 0.5) > 0.1
-    G = knn_graph(xy, 10)
-    adata.obsp["spatial_connectivities"] = G
-    adata.obsp["empty_connectivities"] = sp.csr_matrix((adata.n_obs, adata.n_obs))
-    zeros = G.copy()
-    zeros.data[:] = 0.0  # stored zeros (as left by zeroing cross-type entries) are not neighbours
-    adata.obsp["zero_connectivities"] = zeros + sp.eye(adata.n_obs, format="csr")  # nor are self-loops
-    kw = {"min_genes": 5, "n_jobs": 2, "inplace": False}
+    G = n_chrom * genes
+    mu = rng.lognormal(-1, 1.2, G)
+    cn = np.ones(G)
+    for c, a, b, f in CN_EVENTS:
+        cn[c * genes + a * genes // 400 : c * genes + b * genes // 400] = f
+    xy = rng.random((n, 2))
+    ref = rng.random(n) < 0.35
+    dist = np.hypot(xy[:, 0] - 0.35, xy[:, 1] - 0.5) - 0.25
+    tumour = ~ref & (dist < 0)
+    programs = np.where(rng.random((2, G)) < 0.05, rng.choice([0.25, 4.0], (2, G)), 1.0)
+    lam = mu[None] * programs[ref.astype(int)] * np.where(tumour[:, None], cn[None], 1.0)
+    lam *= (depth * rng.lognormal(0, 0.3, n) / lam.sum(axis=1))[:, None]
+    pos = np.tile(np.arange(genes) * (80_000_000 // genes) + 10_000, n_chrom)
+    var = pd.DataFrame(
+        {"chromosome": np.repeat([f"chr{i + 1}" for i in range(n_chrom)], genes), "start": pos, "end": pos + 5_000},
+        index=[f"g{i}" for i in range(G)],
+    )
+    obs = pd.DataFrame({"type": np.where(ref, "immune", "epithelial")}, index=[f"c{i}" for i in range(n)])
+    adata = AnnData(sp.csr_matrix(rng.poisson(lam).astype(np.float32)), obs=obs, var=var)
+    adata.obsp["spatial_connectivities"] = knn_graph(xy, 10)
+    return adata, tumour, ref, np.abs(dist) < 0.05
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_copy_number_neighbour_prior_tissue(seed):
+    """With reference cells, the neighbour prior raises accuracy (also at the tumour edge), calls no reference cell,
+    lowers no reference cell's probability of being diploid, and is not overconfident."""
+    adata, tumour, ref, edge = _tissue(seed)
+    kw = {
+        "min_genes": 5,
+        "n_jobs": 2,
+        "inplace": False,
+        "force_calls": True,
+        "reference_key": "type",
+        "reference_cat": "immune",
+    }
     plain = cnv.tl.copy_number(adata, **kw)
-    smooth = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", **kw)
-    assert _accuracy(adata, smooth[0]) >= 0.98
+    spatial = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", **kw)
 
     def correct(obs):
         return (obs["copy_number"] == "aneuploid").to_numpy() == tumour
 
-    assert correct(smooth[0])[interior].mean() >= correct(plain[0])[interior].mean()
-    assert ((smooth[0]["copy_number_score"] > 0.5) == (smooth[0]["copy_number"] == "aneuploid")).all()
+    assert correct(spatial[0]).mean() >= 0.98
+    assert correct(spatial[0]).mean() >= correct(plain[0]).mean() + 0.02
+    assert correct(spatial[0])[edge].mean() >= correct(plain[0])[edge].mean()
+    s_plain, s = plain[0]["copy_number_score"].to_numpy(), spatial[0]["copy_number_score"].to_numpy()
+    assert (s[ref] <= s_plain[ref] + 1e-12).all()  # reference cells never move towards aneuploid
+    assert not (spatial[0]["copy_number"].to_numpy()[ref] == "aneuploid").any()
+    assert ((s - tumour) ** 2).mean() <= ((s_plain - tumour) ** 2).mean()  # Brier score
+    assert tumour[s > 0.95].mean() >= 0.99  # not overconfident: P(tumour | score > 0.95)
+    # the llr stays the cell's own; labels follow the spatial posterior
+    np.testing.assert_allclose(spatial[0]["copy_number_llr"], plain[0]["copy_number_llr"])
+    assert ((s > 0.5) == (spatial[0]["copy_number"] == "aneuploid")).all()
+    info = spatial[2]["spatial"]
+    assert info["converged"] and 0 < info["neighbour_weight"] <= M._NP_MAX_WEIGHT
+
+
+def test_copy_number_neighbour_prior_without_reference():
+    """Without a reference the neighbour prior uses the whole graph and still improves the calls."""
+    adata, tumour, *_ = _tissue(1)
+    kw = {"min_genes": 5, "n_jobs": 2, "inplace": False, "force_calls": True}
+    plain = cnv.tl.copy_number(adata, **kw)[0]
+    spatial = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", **kw)[0]
+    acc = [((o["copy_number"] == "aneuploid").to_numpy() == tumour).mean() for o in (plain, spatial)]
+    assert acc[1] >= acc[0] + 0.02
+
+
+def test_copy_number_without_graph_edges_is_unchanged():
+    """Graphs without (real) edges change nothing; a missing key raises."""
+    adata = _simulate(n_tumour=300, n_normal=200, depth=300, seed=3)
+    adata.obsp["empty_connectivities"] = sp.csr_matrix((adata.n_obs, adata.n_obs))
+    zeros = knn_graph(np.random.default_rng(0).random((adata.n_obs, 2)), 10)
+    zeros.data[:] = 0.0  # stored zeros (as left by zeroing cross-type entries) are not neighbours
+    adata.obsp["zero_connectivities"] = zeros + sp.eye(adata.n_obs, format="csr")  # nor are self-loops
+    kw = {"min_genes": 5, "n_jobs": 2, "inplace": False}
+    plain = cnv.tl.copy_number(adata, **kw)
     for key in ("empty_connectivities", "zero_connectivities"):
         same = cnv.tl.copy_number(adata, connectivity_key=key, **kw)
-        pd.testing.assert_frame_equal(plain[0], same[0])
-        np.testing.assert_allclose(plain[1], same[1], rtol=1e-6)
-    assert smooth[2]["params"]["connectivity_key"] == "spatial_connectivities"
+        pd.testing.assert_frame_equal(plain[0], same[0], check_exact=True)
+        np.testing.assert_array_equal(plain[1], same[1])
+        assert same[2]["spatial"] == {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}
+        assert same[2]["params"]["connectivity_key"] == key
+    assert "spatial" not in plain[2]
     with pytest.raises(KeyError, match="not found"):
         cnv.tl.copy_number(adata, connectivity_key="missing")
+
+
+def test_neighbour_prior_fixed_point_and_weight():
+    """The sweeps reach the fixed point q_i ~ L_i ((1 - lam) pi_i + lam m_i); the weight is about 0 when neighbours do
+    not predict a cell's clone and large when they do; reference cells only lose aneuploid probability."""
+    rng = np.random.default_rng(0)
+    n, k = 3000, 3
+    xy = rng.random((n, 2))
+    G = knn_graph(xy, 8)
+    log_prior = np.log(np.full((n, k), 1.0 / k))
+
+    def run(clone, ref=None):
+        lt = rng.normal(0, 1.0, (n, k))
+        lt[np.arange(n), clone] += 1.0  # weak evidence for the true clone
+        resp = np.exp(lt + log_prior)
+        resp /= resp.sum(axis=1, keepdims=True)
+        return resp, lt, *M._neighbour_prior(G, np.arange(n), resp, lt, log_prior, ref)
+
+    coherent = np.minimum((xy[:, 0] * k).astype(int), k - 1)  # three stripes
+    resp, lt, q, info = run(coherent)
+    assert info["converged"] and info["neighbour_weight"] > 0.5
+    lam = info["neighbour_weight"]
+    m = np.asarray(G @ q) / np.asarray(G.sum(axis=1))
+    fp = np.exp(lt - lt.max(axis=1, keepdims=True)) * ((1 - lam) / k + lam * m)
+    np.testing.assert_allclose(q, fp / fp.sum(axis=1, keepdims=True), atol=1e-4)
+    assert (q.argmax(axis=1) == coherent).mean() > (resp.argmax(axis=1) == coherent).mean() + 0.2
+    _, _, _, info = run(rng.integers(0, k, n))  # clones placed at random
+    assert info["neighbour_weight"] < 0.1
+    ref = rng.random(n) < 0.3
+    resp, _, q, _ = run(coherent, ref)
+    assert (q[ref, 1:].sum(axis=1) <= resp[ref, 1:].sum(axis=1) + 1e-12).all()

@@ -329,3 +329,31 @@ def mix_rows(resp, prof, rows, cols, out):
             for k in range(K):
                 acc += resp[r, k] * prof[k, j]
             out[i, cols[j]] = acc
+
+
+@njit_parallel
+def neighbour_prior_sweep(indptr, indices, w, lik, base, lam, fixed, q, out):
+    """One synchronous update of the spatial posteriors: `out_i ~ lik_i * ((1 - lam) base_i + lam m_i)`.
+
+    `m_i` is the mean of the posteriors `q_j` of i's neighbours in the CSR graph (`indptr`, `indices`, weights `w`,
+    no diagonal), weighted by `w`. Rows with `fixed` keep `q_i`.
+    """
+    n, k = q.shape
+    for i in prange(n):
+        if fixed[i]:
+            for c in range(k):
+                out[i, c] = q[i, c]
+            continue
+        d = 0.0
+        for e in range(indptr[i], indptr[i + 1]):
+            d += w[e]
+        tot = 0.0
+        for c in range(k):
+            m = 0.0
+            for e in range(indptr[i], indptr[i + 1]):
+                m += w[e] * q[indices[e], c]
+            p = lik[i, c] * ((1.0 - lam) * base[i, c] + lam * m / d)
+            out[i, c] = p
+            tot += p
+        for c in range(k):
+            out[i, c] /= tot
