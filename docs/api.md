@@ -69,12 +69,14 @@ Which function to use:
 - {func}`~infercnvpy.tl.copy_number` calls copy number. It returns calibrated aneuploid and diploid labels, clones and
   segments, from raw counts, with or without reference cells. Use it for droplet and imaging UMI data, not for
   Smart-seq2. Providing reference cells improves the detection of small clones on dense panels. On imaging data,
-  `connectivity_key` adds a spatial prior: each cell's prior over the clones mixes in its neighbors' posteriors,
-  with a weight estimated from the data. With fewer than 1,000 usable genes (small panels such as Xenium 480) or a
-  median below 150 counts per cell, it labels the cells `"undetermined"` instead of calling them; use `tl.infercnv`
-  there.
-  `tl.infercnv` and `tl.copy_number` write their profiles to `adata.obsm` and `adata.uns` in the same layout, so the plots, scores, embeddings and
-  spatial tools below accept the output of either (`use_rep="cnv"` or `use_rep="copy_number"`).
+  `connectivity_key` lets each cell's spatial neighbours inform its call. With fewer than 1,000 usable genes (small
+  panels such as Xenium 480) or a median below 150 counts per cell, it labels the cells `"undetermined"` instead of
+  calling them. There, run {func}`~infercnvpy.tl.detectability` to see which arms the panel can resolve, and then
+  `tl.infercnv` with {func}`~infercnvpy.tl.smooth_cnv`.
+
+`tl.infercnv` and `tl.copy_number` write their profiles to `adata.obsm` and `adata.uns` in the same layout, so the
+plots, scores, embeddings and spatial tools below accept the output of either (`use_rep="cnv"` or
+`use_rep="copy_number"`).
 
 ### CNV scores
 

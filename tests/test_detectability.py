@@ -6,6 +6,7 @@ import pytest
 import scipy.sparse as sp
 from anndata import AnnData, read_h5ad
 from matplotlib import pyplot as plt
+from matplotlib.figure import Figure
 from scipy.stats import norm
 
 import infercnvpy as cnv
@@ -389,8 +390,11 @@ def test_plot_bar_and_panels(table):
     ax = cnv.pl.detectability({"panel 1": one, "panel 2": one}, metric="gain_ratio", ideal=True, show=False)
     assert [t.get_text() for t in ax.get_yticklabels()] == ["panel 1", "panel 2"]
     fig = cnv.pl.detectability(one, figsize=(5, 2), cmap=plt.get_cmap("viridis"), return_fig=True)
+    assert isinstance(fig, Figure)
     assert tuple(fig.get_size_inches()) == (5, 2)
-    assert [t.get_text() for t in ax.get_yticklabels()] == ["panel 1", "panel 2"]
+    _, ax = plt.subplots()
+    assert cnv.pl.detectability(one, ax=ax, show=False) is ax
+    assert ax.get_legend() is not None  # on the given axes, not on a figure the function doesn't own
 
 
 def test_plot_indexed_and_reordered(table):
@@ -415,8 +419,36 @@ def test_plot_errors(table):
         cnv.pl.detectability(table, kind="bar")
     with pytest.raises(ValueError, match="ideal=True"):
         cnv.pl.detectability(table[table.group == "A"], kind="bar", ideal=True)
-    with pytest.raises(ValueError, match="Run `tl.detectability`"):
+    with pytest.raises(ValueError, match="no ideal column"):
+        cnv.pl.detectability(table, metric="null_var", ideal=True)
+    with pytest.raises(KeyError, match="Run `tl.detectability`"):
         cnv.pl.detectability(AnnData(np.zeros((2, 2))))
     # regression: rows of two calls that differ only in parameters not in the table are not merged silently
     with pytest.raises(ValueError, match="several rows per condition"):
         cnv.pl.detectability(pd.concat([table, table]))
+
+
+def test_inplace_false_leaves_adata():
+    sim = Sim()
+    adata = sim.adata(sim.counts(200, 30))
+    _run(adata)
+    assert "detectability" not in adata.uns
+    assert "detectability_information" not in adata.obs
+
+
+def test_threads_and_input_formats():
+    """The result doesn't depend on the number of threads, the matrix format, the dtype, or X against a layer."""
+    sim = Sim()
+    X = sim.counts(600, 30)
+    a = sim.adata(X, status=["normal"] * 300 + ["tumor"] * 300)
+    kwargs = {"groupby": "status", "reference_key": "status", "reference_cat": "normal", "depth": [10, 20]}
+    expected = _run(a, n_jobs=1, **kwargs)
+    pd.testing.assert_frame_equal(_run(a, n_jobs=4, **kwargs), expected, rtol=1e-10)
+    for matrix in (X.astype(np.int64), sp.csr_matrix(X.astype(np.int64)), X.astype(np.float32)):
+        b = a.copy()
+        b.X = matrix
+        pd.testing.assert_frame_equal(_run(b, **kwargs), expected, rtol=1e-6)
+    c = a.copy()
+    c.layers["counts"] = c.X.copy()
+    c.X = sp.csr_matrix(np.log1p(c.X.toarray()))
+    pd.testing.assert_frame_equal(_run(c, layer="counts", **kwargs), expected, rtol=1e-6)

@@ -81,12 +81,27 @@ def detectability(
 
     Returns
     -------
-    The figure if `return_fig` is true, otherwise the axes if `show` is false.
+    The figure if `return_fig` is true, the axes if `show` is false, otherwise `None`.
+
+    See Also
+    --------
+    infercnvpy.tl.detectability : compute the table.
+
+    Examples
+    --------
+    >>> cnv.tl.detectability(adata, groupby="cell_type", reference_key="cell_type", reference_cat=["T cell", "B cell"])
+    >>> cnv.pl.detectability(adata, metric="cells_loss")
+
+    Several panels side by side, from tables computed with `inplace=False`:
+
+    >>> cnv.pl.detectability({"panel A": table_a, "panel B": table_b})
     """
     if metric not in _METRICS:
         raise ValueError(f"`metric` must be one of {', '.join(_METRICS)}, got {metric!r}.")
     if kind not in ("auto", "bar", "heatmap"):
         raise ValueError(f"`kind` must be 'auto', 'bar' or 'heatmap', got {kind!r}.")
+    if ideal and metric in ("info", "null_var"):
+        raise ValueError(f"`metric={metric!r}` has no ideal column; `ideal=True` is for cells and ratios.")
     table = _table(data, key)
     table["_row"] = _conditions(table)
     if table.duplicated(["_row", "arm"]).any():
@@ -124,7 +139,7 @@ def _table(data, key: str) -> pd.DataFrame:
     """The detectability table(s) of `data` as one frame, with `panel` for a dict and index levels as columns."""
     if isinstance(data, AnnData):
         if key not in data.uns or "table" not in data.uns[key]:
-            raise ValueError(f"`adata.uns[{key!r}]` has no detectability table. Run `tl.detectability` first.")
+            raise KeyError(f"`adata.uns[{key!r}]` has no detectability table. Run `tl.detectability` first.")
         data = data.uns[key]["table"]
     if isinstance(data, Mapping):
         data = pd.concat([_table(df, key).assign(panel=label) for label, df in data.items()], ignore_index=True)

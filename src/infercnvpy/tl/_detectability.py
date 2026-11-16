@@ -59,11 +59,12 @@ def detectability(
 ) -> pd.DataFrame | None:
     r"""Estimate how many cells a test needs to detect a copy number change of each chromosome arm.
 
-    For each chromosome arm, the function estimates how many cells of one type that share the same change a test
-    needs to detect a gain (`gain`, default 1.5x) or a loss (`loss`, default 0.5x) of the whole arm. It also gives the
-    smallest change that `at_n_cells` cells show. Run it on your data to see on which arms there is enough power, so
-    that a missing call is informative. Run it with `genes` and `depth` on expression data from a similar tissue to
-    choose a panel and a depth before an experiment.
+    For each chromosome arm, the function estimates how many cells a test needs to detect a gain (`gain`, default
+    1.5x) or a loss (`loss`, default 0.5x) of the whole arm, when all of the cells are of one type and carry the same
+    change. It also gives the smallest change that `at_n_cells` cells show. Run it on your data to see on which arms
+    there is enough power for a missing call to be informative, for a method that attains that power (see Notes). Run
+    it with `genes` and `depth` on expression data from a similar tissue to choose a panel and a depth before an
+    experiment.
 
     The function doesn't find copy number changes in your cells, and it doesn't check that a call is real. A
     chromosome arm is the part of a chromosome on one side of its centromere, the short arm p or the long arm q. A
@@ -112,14 +113,15 @@ def detectability(
         One-sided level of the test of each arm. The default, 0.001, is about 0.05 with a Bonferroni correction for 40
         arms.
     power
-        Power of the test, at least 0.5.
+        Power of the test, in [0.5, 1).
     centromeres
         `"hg38"` for the GRCh38 centromeres, or the centromere position (bp) of each chromosome, which splits it into
         the p and the q arm. With `"hg38"`, a warning flags genes that start beyond the end of their GRCh38
-        chromosome, which points at positions from another genome build.
+        chromosome, which points at positions from another genome build. With a mapping, genes on chromosomes that
+        are not in it are left out without a warning, and the lengths are not checked.
     exclude_chromosomes
-        Chromosomes to leave out. The default leaves out chrY, as :func:`infercnvpy.tl.copy_number` does, so chrX is
-        included. In cells of a male donor, chrX has one copy.
+        Chromosomes to leave out, one name or a list. `None` leaves out none. The default leaves out chrY, as
+        :func:`infercnvpy.tl.copy_number` does, so chrX is included. In cells of a male donor, chrX has one copy.
     random_state
         Seed of the thinning for `depth`. Each target depth gets its own stream, so the rows of one depth don't depend
         on the other depths in the list.
@@ -139,11 +141,12 @@ def detectability(
         One row per depth (in the order of `depth`), group (in the order of its categories) and arm (in genome order),
         with the columns
 
-        * `group`, the cell type (`"all"` without `groupby`). Reference types get rows too, which show what a change
+        * `group` (categorical), the cell type (`"all"` without `groupby`). Reference types get rows too, which show what a change
           in those cells would need;
         * `depth`, the median counts per cell of all cells (the target of `depth`);
         * `group_counts`, the median counts per cell of the group;
-        * `arm` and `chromosome`, the arm (`"chr1p"`, for example) and its chromosome;
+        * `arm` (ordered categorical, in genome order) and `chromosome`, the arm (`"chr1p"`, for example) and its
+          chromosome;
         * `n_genes`, the panel genes on the arm. Arms with fewer than about 5 genes give fragile results;
         * `info`, the Fisher information per cell about the log copy ratio of the arm (mean over the group's cells);
         * `null_var`, how much more the arm's score varies in normal reference cells than counting noise predicts,
@@ -157,7 +160,7 @@ def detectability(
         * the same four with the suffix `_ideal`, the counting bound without the null variance.
     `adata.uns[key_added]["params"]` : :class:`dict`
         Parameters of this call, and `n_reference` (number of reference cells).
-    `adata.obs[f"{key_added}_information"]` : float
+    `adata.obs[f"{key_added}_information"]` : :class:`float`
         Per-cell information summed over arms at the observed depth, a measure of how much a cell can say about copy
         number.
 
@@ -210,9 +213,9 @@ def detectability(
     information. The extrapolation was checked up to about 2 times the observed depth, so for planning, prefer
     expression data at least as deep as the target.
 
-    **Calibration.** We injected arm gains of 1.5x and losses of 0.5x into normal cells of an Atera breast sample
-    (fibroblasts, normal epithelium and one tumour clone), cut to five panels at two depths. An ideal score test with
-    the true expected expression needed 0.6 to 1.1 times the cells of the achievable column, and the two rank the arms
+    **Calibration.** We injected arm gains of 1.5x and losses of 0.5x into cells of a breast cancer section measured
+    with 10x Atera (whole transcriptome in situ), namely fibroblasts, normal epithelium and one tumour clone, cut to
+    five panels at two depths. An oracle score test that is given the true expected expression needed 0.6 to 1.1 times the cells of the achievable column, and the two rank the arms
     alike (Spearman 0.98 to 0.99). The ideal column over-promises by up to about 3 times on deep, wide panels, where
     the null variance is largest. :func:`infercnvpy.tl.infercnv` needed more cells than the achievable column, by a
     factor that depends on the panel:
