@@ -152,6 +152,13 @@ def copy_number(
     The method is made for UMI counts from droplet (10x) and imaging platforms. On full-length plate data
     (Smart-seq2) its profiles are poor.
 
+    .. warning::
+        Without reference cells, the diploid baseline comes from the sample itself. When tumour cells far outnumber
+        normal cells, especially at low depth (a few hundred counts per cell), the baseline can land on a tumour group,
+        and then the labels are inverted: tumour cells are called diploid and normal cells aneuploid. Pass known normal
+        cells with `reference_key` and `reference_cat` in such samples. `adata.uns["copy_number"]["seed"]` shows how
+        the baseline was found, and a warning flags the least certain case.
+
     Parameters
     ----------
     adata
@@ -285,6 +292,10 @@ def copy_number(
         final likelihood uses these weights).
     `adata.uns["copy_number"]["baseline"]` : :class:`str`
         How the first diploid cells were found.
+    `adata.uns["copy_number"]["seed"]` : :class:`dict`
+        The baseline `method`, the `flatness_gap` between the flat and the other groups and the gap that counts as a
+        clear split (`clear_gap`). Without a clear split and without marker-rich groups (`method` "flattest group"),
+        a warning says that the baseline is uncertain.
     `adata.uns["copy_number"]["temperature"]` : :class:`float`
         Scale applied to the log likelihoods for the posterior.
     `adata.uns["copy_number"]["params"]` : :class:`dict`
@@ -377,16 +388,19 @@ def copy_number(
         n_groups = int(groups.max()) + 1
         if is_ref is not None:
             normal = is_ref[cells[fit]]
-            baseline_method = "reference"
+            baseline_method, flat_gap = "reference", np.nan
         else:
-            is_marker_var = np.asarray(adata.var_names.isin(_marker_list(normal_markers)))
-            lay_seed, Yc_seed = _seed_genes(data, clusters, var, candidates, is_marker_var, min_detection)
-            is_marker = is_marker_var[lay_seed.order]
-            normal, baseline_method = _seed(Yc_seed, groups, gcell, lay_seed, is_marker)
+            log.info(
+                "copy_number: no reference cells, so the diploid baseline comes from the sample itself. Where known "
+                "normal cells are annotated, give them as `reference_key` / `reference_cat` for a reliable baseline."
+            )
+            is_marker = np.asarray(adata.var_names.isin(_marker_list(normal_markers)))
+            marker, total = _marker_counts(data, clusters, Yc, var, candidates, is_marker)
+            normal, baseline_method, flat_gap = _seed(Yc, marker, total, groups, gcell, lay)
 
         em = _EM(data, hmm, gene_var, min_burden, clusters, Yc, Sc)
         if is_ref is None and normal_markers is not None:
-            em.normal_type = _marker_types(Yc_seed, lay_seed, is_marker)
+            em.normal_type = _marker_types(Yc, marker / total, lay)
             log.debug("copy_number: marker-rich expression types %s", np.flatnonzero(em.normal_type))
         frac = np.bincount(gcell, weights=normal, minlength=n_groups) / np.bincount(gcell, minlength=n_groups)
         lut = np.where(frac > 0.5, 0, 1 + np.arange(n_groups))
@@ -403,9 +417,9 @@ def copy_number(
             k = int(assign.max()) + 1
             target = np.arange(k)
             if not fixed and not reseeded:
-                Yk = data.pooled(assign, k, lay_seed)[0]
+                Yk = data.pooled(assign, k)[0]
                 sizes = np.bincount(assign, minlength=k)
-                flat = np.array([_flatness(y, lay_seed) for y in Yk])
+                flat = np.array([_flatness(y, lay) for y in Yk])
                 small = sizes < min(_MIN_RESEED, int(sizes.max()))
                 small[0] = False  # the diploid clone itself may be a rare normal population
                 flat[small] = np.inf
@@ -470,6 +484,7 @@ def copy_number(
             index=np.asarray(adata.var_names)[lay.order],
         ),
         "baseline": baseline_method,
+        "seed": {"method": baseline_method, "flatness_gap": float(flat_gap), "clear_gap": _FLAT_GAP},
         "temperature": em.tau,
         "params": params,
     }
@@ -484,6 +499,14 @@ def copy_number(
         remedy="lower `min_genes`",
         time=start,
     )
+    if baseline_method == "flattest group":
+        log.warning(
+            "copy_number: the diploid baseline is uncertain. No group of cells is clearly flatter along the genome "
+            "than the others (flatness gap %.3f, a clear split needs %.2f) and none is rich in normal markers, so the "
+            "single flattest group was taken; in samples with few normal cells this can be a tumour group, which "
+            "inverts the calls. Give known normal cells as `reference_key` / `reference_cat`.",
+            flat_gap, _FLAT_GAP,
+        )  # fmt: skip
     if n_an == 0:
         log.warning(
             "copy_number: no cell is called aneuploid. The diploid baseline comes from the sample itself, so a sample "
@@ -630,21 +653,19 @@ def _filter_cells_genes(adata, source, excluded, exclude_chromosomes, min_genes,
     return cells, lay, var, candidates
 
 
-def _seed_genes(data, clusters, var, candidates, is_marker, min_detection):
-    """Layout and pooled cluster counts of the genes that the baseline seed scores.
+def _marker_counts(data, clusters, Yc, var, candidates, is_marker) -> tuple[np.ndarray, np.ndarray]:
+    """Counts of each cluster in the marker genes, and in the model's genes plus the markers.
 
-    These are the genes detected in at least `min_detection` of the cells of any expression cluster, and the marker
-    genes. The model's genes are detected in `min_detection` of all cells: where a tumour is the majority, its losses
-    fall below that threshold more often than its gains, and the genes left tilt the genomic flatness of every group
-    towards the tumour. Per cluster, a gene lost in the tumour is still detected in the normal cells.
+    Every marker counts, also those that the detection filter removed from the model's genes, so that a rare normal
+    population keeps its markers; the genomic flatness of the seed uses the model's genes only.
     """
-    lay_c = _Layout(var, candidates)
-    Yc, _, det = data.pooled(clusters, lay=lay_c, detected=True)
-    rate = det / np.bincount(clusters)[:, None]
-    keep = (rate >= min_detection).any(axis=0) | is_marker[lay_c.order]
-    used = np.zeros(len(var), dtype=bool)
-    used[lay_c.order[keep]] = True
-    return _Layout(var, used), Yc[:, keep]
+    markers = is_marker & candidates
+    total = Yc.sum(axis=1)
+    if not markers.any():
+        return np.zeros(len(Yc)), total
+    M = data.pooled(clusters, len(Yc), _Layout(var, markers))[0]
+    outside = data.lay.col_map[np.flatnonzero(markers)] < 0
+    return M.sum(axis=1), total + M[:, outside].sum(axis=1)
 
 
 def _as_list(x) -> list:
@@ -682,20 +703,15 @@ class _Data:
             yield i0, i0 + len(rws), _csr(X)[rws][:, self.lay.order].astype(np.float64)
             i0 += len(rws)
 
-    def pooled(self, labels: np.ndarray, k: int | None = None, lay=None, detected: bool = False):
-        """Pooled gene counts (k x genes of `lay`, default: the model's) and pooled size factors of each label.
-
-        With `detected`, also the number of cells of each label in which each gene is detected.
-        """
+    def pooled(self, labels: np.ndarray, k: int | None = None, lay=None):
+        """Pooled gene counts (k x genes of `lay`, default: the model's) and pooled size factors of each label."""
         lay = self.lay if lay is None else lay
         k = int(labels.max()) + 1 if k is None else k
         labels = np.ascontiguousarray(labels, dtype=np.int64)
         slabs = np.zeros((min(numba.get_num_threads(), 16), k, lay.n_genes))
-        det = np.zeros_like(slabs) if detected else np.zeros((0, 0, 0))
         for i0, i1, X, rws in _row_blocks(self.source, self.cells):
-            K.pooled_counts(X.data, X.indices, X.indptr, rws, lay.col_map, labels[i0:i1], slabs, det)
-        out = slabs.sum(axis=0), np.bincount(labels, weights=self.size, minlength=k)
-        return (*out, det.sum(axis=0)) if detected else out
+            K.pooled_counts(X.data, X.indices, X.indptr, rws, lay.col_map, labels[i0:i1], slabs)
+        return slabs.sum(axis=0), np.bincount(labels, weights=self.size, minlength=k)
 
     def expression_pcs(self, rng) -> np.ndarray:
         """First principal components of log-normalised expression of the most variable genes."""
@@ -863,7 +879,7 @@ def _marker_list(markers) -> list[str]:
     return _as_list(markers)
 
 
-def _seed(Yc, groups, gcell, lay, is_marker) -> tuple[np.ndarray, str]:
+def _seed(Yc, marker, total, groups, gcell, lay) -> tuple[np.ndarray, str, float]:
     """Cells of the first baseline.
 
     These are the groups in the flat cluster of a 2-means split of the group flatness (if the
@@ -882,7 +898,7 @@ def _seed(Yc, groups, gcell, lay, is_marker) -> tuple[np.ndarray, str]:
     if hi - lo > _FLAT_GAP:
         seed |= ok & (flat < (lo + hi) / 2)
         method = "flat groups"
-    mfrac = Yg[:, is_marker].sum(1) / Yg.sum(1)
+    mfrac = np.bincount(groups, weights=marker) / np.bincount(groups, weights=total)
     # lower quartile, not median: in samples where normal cells are the majority the median group is itself marker-rich
     low = np.quantile(mfrac[ok], 0.25)
     marked = ok & (mfrac > np.maximum(_MARKER_FOLD * low, _MARKER_MIN)) & (flat < np.median(flat[ok]))
@@ -891,12 +907,11 @@ def _seed(Yc, groups, gcell, lay, is_marker) -> tuple[np.ndarray, str]:
         method += " + markers"
     log.debug("copy_number: group flatness %s, marker fraction (per mille) %s, sizes %s, seed %s",
               np.round(flat, 3), np.round(1000 * mfrac, 2), sizes, np.flatnonzero(seed))  # fmt: skip
-    return seed[gcell], method
+    return seed[gcell], method, hi - lo
 
 
-def _marker_types(Yc, lay, is_marker) -> np.ndarray:
+def _marker_types(Yc, mfrac, lay) -> np.ndarray:
     """Expression types that are marker-rich (same rule as the marker-rich seed groups) and flatter than the median."""
-    mfrac = Yc[:, is_marker].sum(1) / Yc.sum(1)
     flat = np.array([_flatness(y, lay) for y in Yc])
     low = np.quantile(mfrac, 0.25)
     return (mfrac > max(_MARKER_FOLD * low, _MARKER_MIN)) & (flat < np.median(flat))

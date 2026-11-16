@@ -108,16 +108,14 @@ def hmm_posteriors(Y, V, stay, means, log_prior, nu, post_mean, post_neutral, st
 
 
 @njit_parallel
-def pooled_counts(data, indices, indptr, rws, col_map, labels, out, det):
+def pooled_counts(data, indices, indptr, rws, col_map, labels, out):
     """Add the counts of each cell (row) to the row of its label: `out[chunk, label, gene]`, one slab per chunk.
 
-    With a non-empty `det` (same shape), also count the cells in which each gene is detected. Each chunk of cells
-    writes its own slab, so there are no write conflicts; the caller sums the slabs.
+    Each chunk of cells writes its own slab, so there are no write conflicts; the caller sums the slabs.
     """
     n_chunks = out.shape[0]
     n_rows = labels.shape[0]
     step = (n_rows + n_chunks - 1) // n_chunks
-    count_det = det.shape[0] > 0
     for ch in prange(n_chunks):
         for r in range(ch * step, min(n_rows, (ch + 1) * step)):
             lab = labels[r]
@@ -125,8 +123,6 @@ def pooled_counts(data, indices, indptr, rws, col_map, labels, out, det):
                 g = col_map[indices[k]]
                 if g >= 0:
                     out[ch, lab, g] += data[k]
-                    if count_det and data[k] > 0:
-                        det[ch, lab, g] += 1.0
 
 
 @njit
