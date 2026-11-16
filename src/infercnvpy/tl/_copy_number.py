@@ -160,6 +160,20 @@ def copy_number(
         cells with `reference_key` and `reference_cat` in such samples. `adata.uns["copy_number"]["seed"]` shows how
         the baseline was found, and a warning flags the least certain case.
 
+    .. warning::
+        With reference cells, weak clones in shallow data can be called diploid. After each pass, an aneuploid clone
+        whose profile has a smooth amplitude below 0.1 merges into the diploid clone, and in shallow data a clone that
+        mixes tumour and normal cells can stay below that cut. On an Atera breast cancer Xenium 5K panel cut thinned to
+        a quarter of its counts, a run with an immune and stromal reference called no cell aneuploid, while the
+        reference-free run called 87% of the epithelial cells. When a run with reference cells calls few or no cells,
+        run without a reference as well and compare the two.
+
+        Every normal cell type in the sample belongs in the reference, including stromal cells such as smooth muscle
+        cells and pericytes. A normal cell type left out of the reference can form clones from the smooth part of its
+        expression difference to the reference, and normal cells of other types can join those clones. In an Atera
+        breast cancer section with smooth muscle cells left out of the reference, the normal epithelium was called
+        diploid with one k-means seed and 89% aneuploid with another.
+
     Parameters
     ----------
     adata
