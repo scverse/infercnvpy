@@ -435,7 +435,7 @@ def copy_number(
 
         gcell = groups[clusters]
         n_groups = int(groups.max()) + 1
-        if is_ref is not None:
+        if ref_fit is not None:
             normal = ref_fit
             baseline_method, flat_gap = "reference", np.nan
         else:
@@ -448,7 +448,7 @@ def copy_number(
             normal, baseline_method, flat_gap = _seed(Yc, marker, total, groups, gcell, lay)
 
         em = _EM(data, hmm, gene_var, min_burden, clusters, Yc, Sc)
-        if is_ref is not None:
+        if ref_fit is not None:
             # reference types are normal types with a diploid prior, and reference cells stay in the diploid clone
             # during the fit: with several reference cell types, a reference type whose smooth deviation from the
             # pooled reference resembles a clone's profile would otherwise join that clone at depth
@@ -501,7 +501,8 @@ def copy_number(
         spatial = None
         if G is not None and resp.shape[1] > 1:
             ref_cells = None if is_ref is None else is_ref[cells]
-            resp, spatial = _neighbour_prior(G, cells, resp, *em.post_terms, ref_cells, max_neighbour_weight)
+            lt, log_prior = em.post_terms
+            resp, spatial = _neighbour_prior(G, cells, resp, lt, log_prior, ref_cells, max_neighbour_weight)
         k = resp.shape[1]
         p_an = resp[:, 1:].sum(axis=1)
         clone = np.where(p_an > 0.5, 1 + resp[:, 1:].argmax(axis=1), 0) if k > 1 else np.zeros(n, dtype=np.int64)
