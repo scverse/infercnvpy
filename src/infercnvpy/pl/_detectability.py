@@ -8,6 +8,8 @@ import pandas as pd
 from anndata import AnnData
 from matplotlib import colors as mcolors
 from matplotlib.axes import Axes
+from matplotlib.colors import Colormap
+from matplotlib.figure import Figure
 from matplotlib.patches import Patch, Rectangle
 
 from infercnvpy.pl._chromosome_heatmap import _figure, _finish
@@ -32,24 +34,26 @@ def detectability(
     ideal: bool = False,
     kind: Literal["auto", "heatmap", "bar"] = "auto",
     min_genes: int = 5,
-    cmap: str = "Blues",
+    cmap: str | Colormap = "Blues",
+    figsize: tuple[float, float] | None = None,
     ax: Axes | None = None,
     show: bool | None = None,
     save: str | bool | None = None,
     return_fig: bool | None = None,
-):
+) -> Figure | Axes | None:
     """Plot the result of :func:`infercnvpy.tl.detectability` per chromosome arm.
 
     One condition (a group at a depth) gives a bar chart, with a bar per arm for the achievable value and a black tick
     for the ideal counting bound, so that the gap between them is visible. Several conditions (groups, depths, or
-    several panels passed as a dict) give a heatmap with arms as columns and conditions as rows. Arms with fewer than
-    `min_genes` panel genes are hatched, and values that no copy ratio or number of cells attains are gray.
+    several panels passed as a dict of tables) give a heatmap with arms as columns and conditions as rows. Arms with
+    fewer than `min_genes` panel genes are hatched, and values that no copy ratio or number of cells attains are
+    gray.
 
     Parameters
     ----------
     data
-        AnnData with the result in `adata.uns[key]`, the table that :func:`infercnvpy.tl.detectability` returns, or a
-        dict of such tables, one per panel for example (the keys label the rows).
+        AnnData with the result in `adata.uns[key]`, or a table that :func:`infercnvpy.tl.detectability` returns with
+        `inplace=False`, or a dict of such tables, one per panel for example (the keys label the rows).
     metric
         Column to plot: `cells_gain`, `cells_loss` (log scale), `gain_ratio`, `loss_ratio` (log scale),
         `info` or `null_var`.
@@ -64,6 +68,8 @@ def detectability(
         Arms with fewer panel genes are hatched.
     cmap
         Color map of the heatmap.
+    figsize
+        Size of the figure, if `ax` is not given. Default: from the number of arms and rows.
     ax
         Axes to draw into.
     show
@@ -85,7 +91,7 @@ def detectability(
     table["_row"] = _conditions(table)
     if table.duplicated(["_row", "arm"]).any():
         raise ValueError(
-            "The table has several rows per condition and arm, for example from calls with different `n_cells` or "
+            "The table has several rows per condition and arm, for example from calls with different `at_n_cells` or "
             "`alpha`. Pass the tables as a dict, `{label: table}`, to label them."
         )
     n_rows = table["_row"].nunique()
@@ -93,10 +99,14 @@ def detectability(
         kind = "bar" if n_rows == 1 else "heatmap"
     if kind == "bar" and n_rows > 1:
         raise ValueError("A bar chart shows one condition; select one group and depth, or use `kind='heatmap'`.")
+    if kind == "bar" and ideal:
+        raise ValueError("The bar chart shows the ideal bound as ticks already; `ideal=True` is for the heatmap.")
     arms = sorted(set(table["arm"].astype(str)), key=_arm_key)
 
     own = ax is None
-    fig, ax = _figure(ax, (max(6.0, 0.25 * len(arms) + 2.5), 3.5 if kind == "bar" else 0.35 * n_rows + 2.2))
+    if figsize is None:
+        figsize = (max(6.0, 0.25 * len(arms) + 2.5), 3.5 if kind == "bar" else 0.35 * n_rows + 2.2)
+    fig, ax = _figure(ax, figsize)
     if own:
         fig.set_layout_engine("constrained")
     if kind == "bar":
@@ -173,7 +183,7 @@ def _bars(ax: Axes, table: pd.DataFrame, arms: list[str], metric: str, min_genes
     return handles
 
 
-def _heatmap(ax: Axes, table, arms: list[str], metric: str, ideal: bool, min_genes: int, cmap: str) -> list:
+def _heatmap(ax: Axes, table, arms: list[str], metric: str, ideal: bool, min_genes: int, cmap: str | Colormap) -> list:
     column = f"{metric}_ideal" if ideal and f"{metric}_ideal" in table else metric
     labels = list(dict.fromkeys(table["_row"]))
     wide = table.assign(arm=table["arm"].astype(str)).pivot(index="_row", columns="arm", values=[column, "n_genes"])

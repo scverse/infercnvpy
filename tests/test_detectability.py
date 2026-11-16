@@ -4,14 +4,15 @@ import numpy as np
 import pandas as pd
 import pytest
 import scipy.sparse as sp
-from anndata import AnnData
+from anndata import AnnData, read_h5ad
+from matplotlib import pyplot as plt
 from scipy.stats import norm
 
 import infercnvpy as cnv
-from infercnvpy.tl._detectability import HG38_CENTROMERES
+from infercnvpy.tl._detectability import _HG38_CENTROMERES
 
 CHROMS = ["chr1", "chr2", "chr3", "chr4"]
-CENTROMERES = {c: HG38_CENTROMERES[c] for c in CHROMS}
+CENTROMERES = {c: _HG38_CENTROMERES[c] for c in CHROMS}
 PHI = 0.5  # NB dispersion of every gene
 ALPHA = 0.01
 REPLICATES = 1000
@@ -24,7 +25,7 @@ class Sim:
         self.rng = np.random.default_rng(seed)
         rows = []
         for c in CHROMS:
-            cen = HG38_CENTROMERES[c]
+            cen = _HG38_CENTROMERES[c]
             for side, (lo, hi) in (("p", (1e6, cen - 1e6)), ("q", (cen + 1e6, cen + 40e6))):
                 rows += [(c, int(s), c + side) for s in np.sort(self.rng.uniform(lo, hi, 15))]
         self.var = pd.DataFrame(rows, columns=["chromosome", "start", "arm"], index=[f"g{i}" for i in range(len(rows))])
@@ -63,7 +64,7 @@ class Sim:
 
 
 def _run(adata, **kwargs):
-    kwargs = {"inplace": False, "alpha": ALPHA, "n_cells": 50, "centromeres": CENTROMERES} | kwargs
+    kwargs = {"inplace": False, "alpha": ALPHA, "at_n_cells": 50, "centromeres": CENTROMERES} | kwargs
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "Measuring the null variance on all cells")
         return cnv.tl.detectability(adata, **kwargs).set_index("arm", drop=False)
@@ -141,19 +142,20 @@ def test_inplace_and_obs():
     params = adata.uns["det"]["params"]
     assert params["n_reference"] == 500
     assert params["centromeres"] == CENTROMERES
-    assert params["exclude_chromosomes"] == ["chrX", "chrY"]
+    assert params["exclude_chromosomes"] == ["chrY"]
     assert params["random_state"] == 3
-    info = adata.obs["det_info"].to_numpy()
+    info = adata.obs["det_information"].to_numpy()
     assert np.all(info >= 0)
     assert info.sum() == pytest.approx(500 * table["info"].sum())
 
 
-@pytest.mark.parametrize("centromeres", [None, HG38_CENTROMERES])
+@pytest.mark.parametrize("centromeres", ["hg38", _HG38_CENTROMERES])
 def test_default_arms(centromeres):
-    """GRCh38 (by default or passed): all arms except the acrocentric p arms, with 0 genes where the panel has none."""
+    """GRCh38 (by name or passed): all arms but chrY and the acrocentric p arms, with 0 genes where the panel has none."""
     sim = Sim()
     df = _run(sim.adata(sim.counts(300, 30)), centromeres=centromeres)
-    assert len(df) == 39
+    assert len(df) == 41
+    assert {"chrXp", "chrXq"} <= set(df.index)
     assert "chr13p" not in df.index
     empty = df.loc["chr22q"]
     assert empty["n_genes"] == 0
@@ -161,31 +163,36 @@ def test_default_arms(centromeres):
     assert np.isnan(empty["gain_ratio"])
 
 
-def test_gene_list_mode():
+def test_genes():
+    """`genes` cuts the panel out of adata, warns about missing genes, and stores the result in adata."""
     sim = Sim()
-    expression = sim.adata(sim.counts(1000, 50), status=["normal"] * 1000)
-    genes = list(expression.var_names[::2])
+    adata = sim.adata(sim.counts(1000, 50), status=["normal"] * 1000)
+    genes = list(adata.var_names[::2])
     kwargs = {"reference_key": "status", "reference_cat": "normal"}
-    with pytest.warns(UserWarning, match="1 of 61 panel genes"):
-        from_list = _run(iter([*genes, "NOT_A_GENE"]), expression=expression, **kwargs)  # any iterable
-    from_data = _run(expression[:, genes].copy(), **kwargs)
+    with pytest.warns(UserWarning, match="1 of 61 genes"):
+        from_list = _run(adata, genes=iter([*genes, "NOT_A_GENE"]), **kwargs)  # any iterable
+    from_data = _run(adata[:, genes].copy(), **kwargs)
     pd.testing.assert_frame_equal(from_list, from_data)
     # the panel has fewer counts per cell than the transcriptome it is cut from
-    assert from_list["counts_per_cell"].iloc[0] < np.median(expression.X.sum(axis=1).A1)
+    assert from_list["group_counts"].iloc[0] < np.median(adata.X.sum(axis=1).A1)
+    with pytest.warns(UserWarning, match="1 of 61 genes"):
+        cnv.tl.detectability(adata, genes=[*genes, "NOT_A_GENE"], centromeres=CENTROMERES, key_added="plan", **kwargs)
+    assert adata.uns["plan"]["params"]["genes"] == genes
+    assert adata.obs["plan_information"].shape == (adata.n_obs,)
 
 
 def test_depths():
     sim = Sim()
     adata = sim.adata(sim.counts(3000, 40))
     observed = np.median(adata.X.sum(axis=1).A1)
-    df = _run(adata, counts_per_cell=[observed / 2, observed, observed * 2])
+    df = _run(adata, depth=[observed / 2, observed, observed * 2])
     low, mid, high = (g for _, g in df.groupby("depth"))
     assert set(low["null_var_source"]) == set(mid["null_var_source"]) == {"measured"}
     assert set(high["null_var_source"]) == {"extrapolated"}
     assert (low["cells_gain_ideal"] / mid["cells_gain_ideal"]).between(1.3, 2.3).all()
     assert (mid["cells_gain_ideal"] / high["cells_gain_ideal"]).between(1.3, 2.3).all()
     # each depth has its own random stream: thinning to a depth gives the same rows alone or in a list
-    alone = _run(adata, counts_per_cell=observed / 2)
+    alone = _run(adata, depth=observed / 2)
     pd.testing.assert_frame_equal(alone, low)
 
 
@@ -200,7 +207,7 @@ def test_extrapolated_null_variance():
     shallow = sim.adata(sim.counts(3000, 20, program=program))
     deep = sim.adata(sim.counts(3000, 200, program=program))
     target = np.median(deep.X.sum(axis=1).A1)
-    extrapolated = _run(shallow, counts_per_cell=target)
+    extrapolated = _run(shallow, depth=target)
     measured = _run(deep)
     assert set(extrapolated["null_var_source"]) == {"extrapolated"}
     ratio = extrapolated["cells_gain"] / measured["cells_gain"]
@@ -240,7 +247,7 @@ def test_single_arm_panel():
     sim = Sim()
     adata = sim.adata(sim.counts(500, 30))[:, sim.arm("chr1p")].copy()
     with pytest.warns(UserWarning, match="no information on the arms chr1p"):
-        df = _run(adata, centromeres={"chr1": HG38_CENTROMERES["chr1"]})
+        df = _run(adata, centromeres={"chr1": _HG38_CENTROMERES["chr1"]})
     row = df.loc["chr1p"]
     assert row["info"] == 0
     assert np.isinf(row["cells_gain"])
@@ -284,21 +291,19 @@ def test_exclude_chromosomes_string():
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"n_cells": 0}, "n_cells"),
+        ({"at_n_cells": 0}, "at_n_cells"),
         ({"gain": 0.9}, "gain"),
         ({"loss": 1.0}, "loss"),
         ({"alpha": 0}, "alpha"),
         ({"power": 1}, "power"),
         ({"power": 0.4}, "power"),
-        ({"counts_per_cell": -5}, "counts_per_cell"),
-        ({"counts_per_cell": np.inf}, "counts_per_cell"),
-        ({"counts_per_cell": []}, "counts_per_cell"),
-        ({"groupby": "nope"}, "groupby"),
+        ({"depth": -5}, "depth"),
+        ({"depth": np.inf}, "depth"),
+        ({"depth": []}, "depth"),
+        ({"centromeres": "hg19"}, "centromeres"),
         ({"reference_key": "status"}, "both"),
         ({"reference_key": "status", "reference_cat": "x"}, "No cell has"),
         ({"reference_key": "status", "reference_cat": []}, "selects no cells"),
-        ({"layer": "counts"}, "layer"),
-        ({"expression": "x"}, "expression"),
         ({"exclude_chromosomes": CHROMS}, "No gene"),
     ],
 )
@@ -320,30 +325,57 @@ def test_input_errors():
         _run(AnnData(adata.X))
     with pytest.raises(ValueError, match="needs cells and genes"):
         _run(adata[:0].copy())
-    with pytest.raises(ValueError, match="pass `expression`"):
+    with pytest.raises(KeyError, match="groupby"):
+        _run(adata, groupby="nope")
+    with pytest.raises(KeyError, match="layer"):
+        _run(adata, layer="counts")
+    with pytest.raises(TypeError, match="pass a gene list as `genes`"):
         _run(["g0", "g1"])
-    with pytest.raises(TypeError, match="gene symbols"):
-        _run("g0")
-    with pytest.raises(ValueError, match="None of the genes"):
-        _run(["x"], expression=adata)
+    with pytest.raises(TypeError, match="not a string"):
+        _run(adata, genes="g0")
+    with pytest.raises(ValueError, match="None of the `genes`"):
+        _run(adata, genes=["x"])
     dup = adata.copy()
     dup.var_names = ["g0"] * 2 + list(dup.var_names[2:])
     with pytest.raises(ValueError, match="more than once"):
-        _run(["g0", "g5"], expression=dup)
+        _run(dup, genes=["g0", "g5"])
+
+
+def test_positions_beyond_hg38():
+    """Gene starts beyond the GRCh38 chromosome lengths point at another genome build."""
+    sim = Sim()
+    adata = sim.adata(sim.counts(100, 30))
+    adata.var.loc[adata.var_names[-3:], "start"] = 260_000_000  # chr4 is 190 Mb long
+    with pytest.warns(UserWarning, match="3 genes start beyond the end"):
+        _run(adata, centromeres="hg38")
+
+
+def test_h5ad_round_trip(tmp_path):
+    sim = Sim()
+    adata = sim.adata(sim.counts(300, 30), status=["normal"] * 300)
+    kwargs = {"reference_key": "status", "reference_cat": "normal", "centromeres": CENTROMERES, "depth": [10, 20]}
+    cnv.tl.detectability(adata, **kwargs)
+    adata.write_h5ad(tmp_path / "a.h5ad")
+    back = read_h5ad(tmp_path / "a.h5ad")
+    pd.testing.assert_frame_equal(
+        back.uns["detectability"]["table"], adata.uns["detectability"]["table"], check_categorical=False
+    )
+    assert back.uns["detectability"]["params"]["depth"].tolist() == [10.0, 20.0]
+    cnv.pl.detectability(back, show=False)
 
 
 @pytest.fixture
 def table():
     sim = Sim()
     X = np.vstack([sim.counts(300, 30), sim.counts(300, 30, fold={"chr2p": 3.0})])
-    return _run(sim.adata(X, cell_type=["A"] * 300 + ["B"] * 300), groupby="cell_type", centromeres=None)
+    return _run(sim.adata(X, cell_type=["A"] * 300 + ["B"] * 300), groupby="cell_type", centromeres="hg38")
 
 
 @pytest.mark.parametrize("metric", ["cells_gain", "loss_ratio", "null_var"])
 def test_plot_heatmap(table, metric):
     ax = cnv.pl.detectability(table, metric=metric, show=False)
     assert [t.get_text() for t in ax.get_yticklabels()] == ["A", "B"]
-    assert len(ax.get_xticklabels()) == 39
+    assert len(ax.get_xticklabels()) == 41
     # regression: the legend sits in the figure margin, not on the tick labels
     assert ax.get_legend() is None
     assert len(ax.get_figure().legends) == 1
@@ -355,6 +387,9 @@ def test_plot_bar_and_panels(table):
     assert ax.get_yscale() == "log"
     assert len(ax.patches) == 8  # one bar per arm with genes
     ax = cnv.pl.detectability({"panel 1": one, "panel 2": one}, metric="gain_ratio", ideal=True, show=False)
+    assert [t.get_text() for t in ax.get_yticklabels()] == ["panel 1", "panel 2"]
+    fig = cnv.pl.detectability(one, figsize=(5, 2), cmap=plt.get_cmap("viridis"), return_fig=True)
+    assert tuple(fig.get_size_inches()) == (5, 2)
     assert [t.get_text() for t in ax.get_yticklabels()] == ["panel 1", "panel 2"]
 
 
@@ -378,6 +413,8 @@ def test_plot_errors(table):
         cnv.pl.detectability(table, metric="nope")
     with pytest.raises(ValueError, match="one condition"):
         cnv.pl.detectability(table, kind="bar")
+    with pytest.raises(ValueError, match="ideal=True"):
+        cnv.pl.detectability(table[table.group == "A"], kind="bar", ideal=True)
     with pytest.raises(ValueError, match="Run `tl.detectability`"):
         cnv.pl.detectability(AnnData(np.zeros((2, 2))))
     # regression: rows of two calls that differ only in parameters not in the table are not merged silently

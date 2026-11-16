@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -16,12 +16,12 @@ from scipy.stats import norm
 from infercnvpy._logging import SKIP_OWN_FRAMES, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
 from infercnvpy._util import _as_df, _as_matrix, _obs_column, _params_for_uns
-from infercnvpy.tl._copy_number import _as_list, _reference_cells
+from infercnvpy.tl._copy_number import HG38_LENGTHS, _as_list, _reference_cells
 from infercnvpy.tl._detectability_kernels import _arm_information, _nb_moments
 from infercnvpy.tl._infercnv import _group_sums, _kernel_ready, _natural_sort
 
 #: GRCh38 centromere midpoints (bp), from the "acen" bands of the UCSC cytoband table
-HG38_CENTROMERES = {
+_HG38_CENTROMERES = {
     c: mb * 1e6
     for c, mb in {
         "chr1": 123.4, "chr2": 93.9, "chr3": 90.9, "chr4": 50.0, "chr5": 48.8, "chr6": 59.8, "chr7": 60.1,
@@ -37,68 +37,178 @@ _MIN_REF_COUNTS = 20  # reference counts of a gene below which its dispersion is
 
 
 def detectability(
-    data: AnnData | Sequence[str],
+    adata: AnnData,
     *,
-    expression: AnnData | None = None,
+    genes: Iterable[str] | None = None,
     layer: str | None = None,
     groupby: str | None = None,
     reference_key: str | None = None,
     reference_cat: str | Sequence[str] | None = None,
-    counts_per_cell: float | Sequence[float] | None = None,
-    n_cells: int = 100,
+    depth: float | Sequence[float] | None = None,
+    at_n_cells: int = 100,
     gain: float = 1.5,
     loss: float = 0.5,
     alpha: float = 1e-3,
     power: float = 0.8,
-    centromeres: Mapping[str, float] | None = None,
-    exclude_chromosomes: Sequence[str] | None = ("chrX", "chrY"),
+    centromeres: Literal["hg38"] | Mapping[str, float] = "hg38",
+    exclude_chromosomes: Sequence[str] | None = ("chrY",),
     random_state: int = 0,
     n_jobs: int | None = None,
     key_added: str = "detectability",
     inplace: bool = True,
 ) -> pd.DataFrame | None:
-    """Which copy number changes of each chromosome arm a panel and depth can detect, and in how many cells.
+    r"""Estimate how many cells a test needs to detect a copy number change of each chromosome arm.
 
-    For every chromosome arm, the function reports the smallest gain and loss that a test on `n_cells` cells
-    detects, and the number of cells it needs to detect a `gain` (default 1.5x) and a `loss` (default 0.5x), from the
-    expression and depth of the data. Use it before an experiment, with a gene list and expression from a similar
-    dataset, to choose a panel and depth. Use it after the experiment, on the data itself, to see on which arms the
-    CNV calls can be trusted.
+    For each chromosome arm, the function estimates how many cells of one type that share the same change a test
+    needs to detect a gain (`gain`, default 1.5x) or a loss (`loss`, default 0.5x) of the whole arm. It also gives the
+    smallest change that `at_n_cells` cells show. Run it on your data to see on which arms there is enough power, so
+    that a missing call is informative. Run it with `genes` and `depth` on expression data from a similar tissue to
+    choose a panel and a depth before an experiment.
 
-    Each number comes twice, as an ideal bound from counting noise alone and as the headline "achievable" value. The
-    achievable value also includes the extra variance that diploid cells show on the arm. On small marker panels, cell
-    type and cell state programs move the few genes of an arm together, which looks like copy number. The ideal bound
-    ignores these programs and over-promises, and the gap between the two columns shows by how much.
+    The function doesn't find copy number changes in your cells, and it doesn't check that a call is real. A
+    chromosome arm is the part of a chromosome on one side of its centromere, the short arm p or the long arm q. A
+    gain of 1.5x is one extra copy of an arm in a diploid genome, and a loss of 0.5x is one copy lost. A test detects
+    a change when it finds it with probability `power` (default 80%), at a rate of false calls of `alpha` per arm
+    (default 1 in 1,000).
 
-    **Model.** A diploid cell expects `m = s p` counts of a gene, with `p` the gene's share of the counts of the cell's
-    group (`groupby`) and `s` the cell's size. The size is the cell's count off the arm, divided by the share of the
-    genes off the arm, so that the arm's own counts don't enter. Counts are negative binomial with mean `m` and
-    dispersion `phi = 1 / k` (size `k`), fitted per gene by the method of moments on the reference cells. A copy ratio
-    `r` of the arm multiplies `m` by `r`. Without a change, the cell's efficient score for the arm,
-    `U = sum (x - m) / (1 + m phi)` over the arm's genes, has mean 0 and variance `I = sum m / (1 + m phi)`. `I` is the
-    Fisher information about the log copy ratio of the negative binomial with a log link :cite:`Lawless1987`, the
-    working weight that DESeq2 uses for its Wald test :cite:`Love2014`. With a change, `U` has mean `(r - 1) I` and
-    variance `r A + r^2 B`, where `A` and `B` are the parts of `I` from counting and from dispersion.
+    Each number comes twice. The ideal columns (suffix `_ideal`) count only the noise of counting. The achievable
+    columns also include the extra variance that normal reference cells show on the arm (`null_var`), which comes from
+    cell type and cell state programs that move the genes of an arm together. Plan with the achievable columns, and
+    read them as a lower bound for real methods (see Notes).
 
-    **Null variance.** Genes of an arm co-vary within cells (cell type and state programs), which the model misses.
-    `null_var` measures the variance of the score on the reference cells as `sum U^2 / sum I` per arm, with each
-    reference cell left out of the shares that give its expectation. Counting noise alone gives 1, and the noise of
-    each cell's size factor adds a little (0.1 to 0.3 in simulations). The achievable values divide the information
-    by the null variance, and the ideal values use 1. Give the cell types as `groupby`, so that differences between
-    types are part of the expectation and not of the null variance. A group without reference cells gets its expected
-    expression from its own cells and the null variance of the other groups' reference cells.
+    .. versionadded:: 0.7.0
 
-    Genes with fewer than 20 reference counts get at least the median dispersion of the better measured genes, so that
-    a gene the reference hardly expresses doesn't count as a Poisson gene. An arm with panel genes but no information
-    in the reference cells has no measured null variance, and its achievable values are NaN, with a warning.
+    Parameters
+    ----------
+    adata
+        Raw counts (cells x genes), with gene positions in `var["chromosome"]` and `var["start"]`.
+    genes
+        Genes of a panel to cut out of `adata`, to plan a panel with expression data from a similar tissue. Genes that
+        are not in `adata.var_names` are left out with a warning. Default: all genes of `adata`.
+    layer
+        Layer with the raw counts. Default: `X`.
+    groupby
+        Column of `obs` with cell types. Each type gets its own expected expression and its own rows in the result.
+        Default: all cells are one group, `"all"`.
+    reference_key
+        Column of `obs` that marks the normal reference cells.
+    reference_cat
+        One or more categories of `reference_key` that are normal. The dispersion of each gene and the null variance
+        are measured on these cells. Default: all cells, which counts real copy number changes as noise and makes the
+        result conservative.
+    depth
+        Target median counts per cell, one value or a list (one set of rows per value). Lower depths come from
+        thinning the counts at random, and higher depths are extrapolated. Default: the observed depth. To plan an
+        experiment, use the counts per cell that the vendor gives for the panel and tissue.
+    at_n_cells
+        Number of cells for `gain_ratio` and `loss_ratio`. `1` gives what a single cell shows.
+    gain
+        Copy ratio of the gain for `cells_gain`. 1.5 is one extra copy in a diploid genome. In a near-tetraploid
+        tumour, one extra copy is 1.25.
+    loss
+        Copy ratio of the loss for `cells_loss`. 0.5 is one copy lost in a diploid genome, and 0.75 in a
+        near-tetraploid tumour.
+    alpha
+        One-sided level of the test of each arm. The default, 0.001, is about 0.05 with a Bonferroni correction for 40
+        arms.
+    power
+        Power of the test, at least 0.5.
+    centromeres
+        `"hg38"` for the GRCh38 centromeres, or the centromere position (bp) of each chromosome, which splits it into
+        the p and the q arm. With `"hg38"`, a warning flags genes that start beyond the end of their GRCh38
+        chromosome, which points at positions from another genome build.
+    exclude_chromosomes
+        Chromosomes to leave out. The default leaves out chrY, as :func:`infercnvpy.tl.copy_number` does, so chrX is
+        included. In cells of a male donor, chrX has one copy.
+    random_state
+        Seed of the thinning for `depth`. Each target depth gets its own stream, so the rows of one depth don't depend
+        on the other depths in the list.
+    n_jobs
+        Number of numba threads. Default: numba's setting.
+    key_added
+        Key of the result in `adata.uns`, and prefix of the per-cell information in `adata.obs`.
+    inplace
+        If `True`, store the result in adata, otherwise return the table.
 
-    **Test.** The test is a one-sided z-test of the score summed over `n` cells, at level `alpha` and with `power`
-    :cite:`Cox1974`. With `I`, `A` and `B` averaged over the cells of a group and `v` the null variance, it detects
-    ratio `r` when `|r - 1| sqrt(n) I >= sqrt(v) (z_alpha sqrt(I) + z_power sqrt(r A + r^2 B))`. Solved for `n`, the
-    condition gives the cells needed, and solved for `r` the smallest detectable ratio. The test treats cells as
-    independent, so a program shared by all cells of a clone (a tumour state, for example) is not averaged away by
-    more cells. It is the bound for a method that knows the diploid expression of every cell type, and methods that
-    estimate the expression from the data need more cells.
+    Returns
+    -------
+    If `inplace=True`, returns `None` and sets the fields below. Otherwise returns the table of
+    `adata.uns[key_added]["table"]`.
+
+    `adata.uns[key_added]["table"]` : :class:`pandas.DataFrame`
+        One row per depth (in the order of `depth`), group (in the order of its categories) and arm (in genome order),
+        with the columns
+
+        * `group`, the cell type (`"all"` without `groupby`). Reference types get rows too, which show what a change
+          in those cells would need;
+        * `depth`, the median counts per cell of all cells (the target of `depth`);
+        * `group_counts`, the median counts per cell of the group;
+        * `arm` and `chromosome`, the arm (`"chr1p"`, for example) and its chromosome;
+        * `n_genes`, the panel genes on the arm. Arms with fewer than about 5 genes give fragile results;
+        * `info`, the Fisher information per cell about the log copy ratio of the arm (mean over the group's cells);
+        * `null_var`, how much more the arm's score varies in normal reference cells than counting noise predicts,
+          at least 1. A value of 1 means counting noise only, and NaN means not measured;
+        * `null_var_source`, `"measured"` (on the counts, thinned to the depth) or `"extrapolated"` (a depth above
+          the data's);
+        * `gain_ratio` and `loss_ratio`, the smallest gain and mildest loss (copy ratios) detectable in `at_n_cells`
+          cells, NaN if no gain or no loss down to 0 is detectable;
+        * `cells_gain` and `cells_loss`, the cells needed to detect a `gain` and a `loss` (`inf` without
+          information);
+        * the same four with the suffix `_ideal`, the counting bound without the null variance.
+    `adata.uns[key_added]["params"]` : :class:`dict`
+        Parameters of this call, and `n_reference` (number of reference cells).
+    `adata.obs[f"{key_added}_information"]` : float
+        Per-cell information summed over arms at the observed depth, a measure of how much a cell can say about copy
+        number.
+
+    See Also
+    --------
+    infercnvpy.pl.detectability : plot the result.
+
+    Notes
+    -----
+    **Model.** A normal cell expects :math:`m = s p` counts of a gene, with :math:`p` the gene's share of the counts
+    of the cell's group and :math:`s` the cell's size. The size is the cell's count off the arm, divided by the share
+    of the genes off the arm, so that the arm's own counts don't enter. Counts are negative binomial with mean
+    :math:`m` and dispersion :math:`\varphi`, fitted per gene by the method of moments on the reference cells, with
+    each reference cell left out of its own expectation. A copy ratio :math:`r` multiplies :math:`m` by :math:`r`.
+    Without a change, the cell's efficient score for the arm has mean 0 and variance :math:`I`,
+
+    .. math::
+
+        U = \sum_{g \in \text{arm}} \frac{x_g - m_g}{1 + m_g \varphi_g}, \qquad
+        I = \sum_{g \in \text{arm}} \frac{m_g}{1 + m_g \varphi_g}.
+
+    :math:`I` is the Fisher information about the log copy ratio of the negative binomial with a log link
+    :cite:`Lawless1987`, the working weight that DESeq2 uses for its Wald test :cite:`Love2014`. With a change,
+    :math:`U` has mean :math:`(r - 1) I` and variance :math:`r A + r^2 B`, where :math:`A` and :math:`B` are the parts
+    of :math:`I` from counting and from dispersion. The null variance :math:`v` is :math:`\sum U^2 / \sum I` over the
+    reference cells, and at least 1. Counting noise alone gives 1, and the noise of each cell's size factor adds 0.1
+    to 0.3. Genes with fewer than 20 reference counts get at least the median dispersion of the other genes, and an arm
+    without information in the reference cells gets NaN achievable values and a warning. A group without reference
+    cells gets its expected expression from its own cells and the null variance of the reference cells.
+
+    **Test.** The test is a one-sided z-test of the score summed over :math:`n` cells :cite:`Cox1974`. With :math:`I`,
+    :math:`A` and :math:`B` averaged over the cells of a group, it detects ratio :math:`r` when
+
+    .. math::
+
+        |r - 1| \sqrt{n}\, I \ge \sqrt{v} \left(z_{1 - \alpha} \sqrt{I} + z_{\text{power}} \sqrt{r A + r^2 B}\right).
+
+    Solved for :math:`n`, the condition gives `cells_gain` and `cells_loss`, and solved for :math:`r` the smallest
+    detectable ratio. The test knows the normal expression of every cell type, so its numbers are a lower bound. It
+    also assumes that expression follows the DNA copies one to one, that the tumour is near diploid (set `gain` and
+    `loss` otherwise), and that all tested cells carry the change. With a share :math:`f` of clone cells among the
+    tested cells, multiply the cells needed by :math:`1 / f^2`. The test treats cells as independent, so a program
+    shared by all cells of a clone (a tumour state, for example) is not averaged away by more cells. It covers whole
+    arms only, so focal events such as an amplification of SOX2 or MYC or a deletion of CDKN2A are not covered.
+
+    **Depths.** With `depth`, the counts are thinned at random to each target median per cell, and the null variance
+    and the information are measured again with the same expected shares and dispersions. A target above the
+    observed depth scales the expected counts up instead (`null_var_source="extrapolated"`). The noise of the size
+    factor then follows from the model at the new depth, and the excess from cell programs grows in proportion to the
+    information. The extrapolation was checked up to about 2 times the observed depth, so for planning, prefer
+    expression data at least as deep as the target.
 
     **Calibration.** We injected arm gains of 1.5x and losses of 0.5x into normal cells of an Atera breast sample
     (fibroblasts, normal epithelium and one tumour clone), cut to five panels at two depths. An ideal score test with
@@ -118,99 +228,12 @@ def detectability(
     On panels of 1,000 genes or fewer, `tl.infercnv` missed about a third of the arm events at any number of cells.
     When many arms change at once, it also shifts arms without a change, by smoothing over arm borders and by
     centring each cell. :func:`infercnvpy.tl.copy_number` detects clones rather than single arms, so the table
-    doesn't apply to it, and on panels below its guard it labels the cells "undetermined".
+    doesn't apply to it.
 
-    **Depths.** With `counts_per_cell`, the counts are thinned at random to each target median per cell, and the null
-    variance and information are measured again with the same expected shares and dispersions. A target above the
-    observed depth scales the expected counts up instead (`null_var_source="extrapolated"`). The null variance then
-    has two parts. The noise of the size factor follows from the model at the new depth, and the excess of the cell
-    programs grows in proportion to the information.
-
-    **Gene-list mode.** Pass a list of gene symbols as `data` and an AnnData of raw counts from a similar tissue as
-    `expression`. The panel is then cut out of `expression`, and the result describes the cells of `expression` at
-    its depth on the panel. Set the depth of your platform with `counts_per_cell`, since imaging panels often have more
-    counts per gene than a droplet dataset.
-
-    .. versionadded:: 0.7.0
-
-    Parameters
-    ----------
-    data
-        Raw counts as AnnData (cells x genes, with gene positions in `var["chromosome"]` and `var["start"]`), or a
-        list of gene symbols (gene-list mode, needs `expression`).
-    expression
-        Gene-list mode only: AnnData of raw counts and gene positions that gives the expression of the panel genes.
-        `layer`, `groupby` and the reference refer to it.
-    layer
-        Layer with the raw counts. Default: `X`.
-    groupby
-        Column of `obs` with cell types. Each type gets its own expected expression and its own rows in the result.
-        Default: all cells are one group, `"all"`.
-    reference_key
-        Column of `obs` that marks the diploid reference cells.
-    reference_cat
-        One or more categories of `reference_key` that are diploid. The NB dispersion and the null variance are
-        measured on these cells. Default: all cells, which counts real copy number changes as null variance and makes
-        the result conservative.
-    counts_per_cell
-        Target median counts per cell, one value or a list (one set of rows per value). Default: the observed depth.
-    n_cells
-        Number of cells for `gain_ratio` and `loss_ratio`. `1` gives what a single cell shows.
-    gain
-        Copy ratio of the gain for `cells_gain` (1.5 is one extra copy of a diploid arm).
-    loss
-        Copy ratio of the loss for `cells_loss` (0.5 is one copy lost).
-    alpha
-        One-sided level of the test of each arm. The default, 0.001, is about 0.05 with a Bonferroni correction for 40
-        arms.
-    power
-        Power of the test, at least 0.5.
-    centromeres
-        Centromere position (bp) of each chromosome, which splits it into the p and q arm. Default: GRCh38.
-    exclude_chromosomes
-        Chromosomes to leave out.
-    random_state
-        Seed of the thinning for `counts_per_cell`. Each target depth gets its own stream, so the rows of one depth
-        don't depend on the other depths in the list.
-    n_jobs
-        Number of numba threads. Default: numba's setting.
-    key_added
-        Key of the result in `adata.uns`, and of the per-cell information in `adata.obs`.
-    inplace
-        If `True`, store the result in adata, otherwise return it. In gene-list mode, the result is always returned.
-
-    Returns
-    -------
-    If `inplace=True` and `data` is an AnnData, returns `None` and sets the fields below. Otherwise returns the table
-    of `adata.uns[key_added]["table"]`.
-
-    `adata.uns[key_added]["table"]` : :class:`pandas.DataFrame`
-        One row per depth (in the order of `counts_per_cell`), group (in the order of its categories) and arm (in
-        genome order), with the columns
-
-        * `group`, the cell type (`"all"` without `groupby`);
-        * `depth`, the median counts per cell of all cells (the target of `counts_per_cell`);
-        * `counts_per_cell`, the median counts per cell of the group;
-        * `arm` and `chromosome`, the arm (`"chr1p"`, for example) and its chromosome;
-        * `n_genes`, the panel genes on the arm. Arms with fewer than about 5 genes give fragile results;
-        * `info`, the Fisher information per cell about the log copy ratio of the arm (mean over the group's cells);
-        * `null_var`, the variance of the arm's score in reference cells relative to the model, at least 1 (1 means
-          counting noise only, NaN means not measured);
-        * `null_var_source`, `"measured"` (on the counts, thinned to the depth) or `"extrapolated"` (a depth above
-          the data's);
-        * `gain_ratio` and `loss_ratio`, the smallest gain and mildest loss (copy ratios) detectable in `n_cells`
-          cells, NaN if no gain or no loss down to 0 is detectable;
-        * `cells_gain` and `cells_loss`, the cells needed to detect a `gain` and a `loss` (`inf` without information);
-        * the same four with the suffix `_ideal`, the counting bound without the null variance.
-    `adata.uns[key_added]["params"]` : :class:`dict`
-        Parameters of this call, and `n_reference` (number of reference cells).
-    `adata.obs[f"{key_added}_info"]` : float
-        Per-cell information summed over arms at the observed depth, a per-cell measure of how much a cell can say
-        about copy number.
-
-    See Also
-    --------
-    infercnvpy.pl.detectability : plot the result.
+    **Small panels.** On panels with fewer than 1,000 usable genes or below a median of 150 counts per cell,
+    `tl.copy_number` labels the cells "undetermined". Use `tl.detectability` to see which arms the panel can resolve,
+    and then :func:`infercnvpy.tl.infercnv` with :func:`infercnvpy.tl.smooth_cnv`. The calls of
+    `tl.copy_number(force_calls=True)` are not calibrated on such panels.
 
     Examples
     --------
@@ -218,35 +241,30 @@ def detectability(
     >>> cnv.tl.detectability(adata, groupby="cell_type", reference_key="cell_type", reference_cat=["T cell", "B cell"])
     >>> cnv.pl.detectability(adata, metric="cells_gain")
 
-    Before an experiment, for a panel at 100 and at 200 counts per cell, with expression from a droplet atlas of the
-    tissue:
+    To plan a panel at 100 and at 300 counts per cell, with expression from a droplet atlas of the tissue:
 
-    >>> cnv.tl.detectability(panel_genes, expression=atlas, groupby="cell_type", counts_per_cell=[100, 200])
+    >>> plan = cnv.tl.detectability(atlas, genes=panel, depth=[100, 300], inplace=False)
     """
-    _check_numbers(n_cells=n_cells, gain=gain, loss=loss, alpha=alpha, power=power)
-    if isinstance(data, AnnData):
-        if expression is not None:
-            raise ValueError("Pass `expression` only with a gene list as `data`; an AnnData brings its own counts.")
-        adata = data
-    else:
-        adata = _panel_from_genes(data, expression)
-        inplace = False
-    if adata.n_obs == 0 or adata.n_vars == 0:
-        raise ValueError(f"`tl.detectability` needs cells and genes, got {adata.n_obs} x {adata.n_vars}.")
+    _check_numbers(at_n_cells=at_n_cells, gain=gain, loss=loss, alpha=alpha, power=power)
+    if not isinstance(adata, AnnData):
+        raise TypeError(f"`adata` must be an AnnData, got {type(adata).__name__}; pass a gene list as `genes`.")
+    panel = adata if genes is None else _cut_panel(adata, genes)
+    if panel.n_obs == 0 or panel.n_vars == 0:
+        raise ValueError(f"`tl.detectability` needs cells and genes, got {panel.n_obs} x {panel.n_vars}.")
 
-    X = _counts(adata, layer)
+    X = _counts(panel, layer)
     exclude = [] if exclude_chromosomes is None else _as_list(exclude_chromosomes)
-    gene_arm, arms = _gene_arms(_as_df(adata.var), centromeres, exclude)
-    group = _groups(adata, groupby)
-    is_ref = _reference(adata, reference_key, reference_cat)
+    gene_arm, arms = _gene_arms(_as_df(panel.var), centromeres, exclude)
+    group = _groups(panel, groupby)
+    is_ref = _reference(panel, reference_key, reference_cat)
 
     totals = np.asarray(X.sum(axis=1)).ravel()
     observed = float(np.median(totals))
     if observed <= 0:
         raise ValueError("The median cell has no counts on the panel.")
-    targets = [observed] if counts_per_cell is None else np.asarray(counts_per_cell, dtype=float).ravel().tolist()
+    targets = [observed] if depth is None else np.asarray(depth, dtype=float).ravel().tolist()
     if not targets or not all(np.isfinite(t) and t > 0 for t in targets):
-        raise ValueError(f"`counts_per_cell` must be one or more positive numbers, got {counts_per_cell!r}.")
+        raise ValueError(f"`depth` must be one or more positive numbers, got {depth!r}.")
 
     model = _Model(gene_arm, len(arms), group.codes.astype(np.int64), len(group.categories), is_ref)
     frames = []
@@ -266,23 +284,26 @@ def detectability(
                 assert base is not None
                 fit = model.run(X, f)
                 null_var, source = _extrapolated(base, fit), "extrapolated"
-            frames.append(_table(fit, null_var, model, group, arms, target, source, n_cells, gain, loss, alpha, power))
+            frames.append(
+                _table(fit, null_var, model, group, arms, target, source, at_n_cells, gain, loss, alpha, power)
+            )
     table = pd.concat(frames, ignore_index=True)
     _warn_unmeasured(table)
 
     n_ref = int(is_ref.sum())
     params = _params_for_uns(
+        genes=None if genes is None else list(panel.var_names),
         groupby=groupby,
         reference_key=reference_key,
         reference_cat=reference_cat,
         layer=layer,
-        counts_per_cell=targets,
-        n_cells=n_cells,
+        depth=targets,
+        at_n_cells=at_n_cells,
         gain=gain,
         loss=loss,
         alpha=alpha,
         power=power,
-        centromeres=None if centromeres is None else dict(centromeres),
+        centromeres=centromeres if isinstance(centromeres, str) else dict(centromeres),
         exclude_chromosomes=exclude,
         random_state=random_state,
         n_reference=n_ref,
@@ -291,7 +312,7 @@ def detectability(
     if inplace:
         assert base is not None
         adata.uns[key_added] = {"table": table, "params": params}
-        adata.obs[f"{key_added}_info"] = base.cell_info
+        adata.obs[f"{key_added}_information"] = base.cell_info
         return None
     return table
 
@@ -420,7 +441,7 @@ def _table(
     arms: list[str],
     depth: float,
     source: str,
-    n_cells: int,
+    at_n_cells: int,
     gain: float,
     loss: float,
     alpha: float,
@@ -432,7 +453,7 @@ def _table(
     out = {
         "group": pd.Categorical(np.repeat(group.categories, model.n_arms), categories=group.categories),
         "depth": depth,
-        "counts_per_cell": np.repeat(fit.counts_per_cell, model.n_arms),
+        "group_counts": np.repeat(fit.counts_per_cell, model.n_arms),
         "arm": pd.Categorical(np.tile(arms, model.n_groups), categories=arms, ordered=True),
         "chromosome": np.tile([a[:-1] for a in arms], model.n_groups),
         "n_genes": np.tile(model.n_genes, model.n_groups),
@@ -441,8 +462,8 @@ def _table(
         "null_var_source": source,
     }
     for suffix, v in (("", null_var), ("_ideal", 1.0)):
-        out[f"gain_ratio{suffix}"] = _min_ratio(I, A, B, v, n_cells, za, zb, gain=True).ravel()
-        out[f"loss_ratio{suffix}"] = _min_ratio(I, A, B, v, n_cells, za, zb, gain=False).ravel()
+        out[f"gain_ratio{suffix}"] = _min_ratio(I, A, B, v, at_n_cells, za, zb, gain=True).ravel()
+        out[f"loss_ratio{suffix}"] = _min_ratio(I, A, B, v, at_n_cells, za, zb, gain=False).ravel()
         out[f"cells_gain{suffix}"] = _cells_needed(I, A, B, v, gain, za, zb).ravel()
         out[f"cells_loss{suffix}"] = _cells_needed(I, A, B, v, loss, za, zb).ravel()
     return pd.DataFrame(out)
@@ -474,9 +495,9 @@ def _min_ratio(I, A, B, v, n: int, za: float, zb: float, *, gain: bool) -> np.nd
     return 1 + s * np.fmin(roots[0], roots[1])
 
 
-def _check_numbers(*, n_cells, gain, loss, alpha, power) -> None:
-    if not (isinstance(n_cells, int | np.integer) and n_cells >= 1):
-        raise ValueError(f"`n_cells` must be a positive integer, got {n_cells!r}.")
+def _check_numbers(*, at_n_cells, gain, loss, alpha, power) -> None:
+    if not (isinstance(at_n_cells, int | np.integer) and at_n_cells >= 1):
+        raise ValueError(f"`at_n_cells` must be a positive integer, got {at_n_cells!r}.")
     if not gain > 1:
         raise ValueError(f"`gain` must be a copy ratio above 1, got {gain}.")
     if not 0 <= loss < 1:
@@ -487,36 +508,32 @@ def _check_numbers(*, n_cells, gain, loss, alpha, power) -> None:
         raise ValueError(f"`power` must be in [0.5, 1), got {power}.")
 
 
-def _panel_from_genes(genes, expression: AnnData | None) -> AnnData:
-    """The panel genes of `expression` (gene-list mode)."""
+def _cut_panel(adata: AnnData, genes: Iterable[str]) -> AnnData:
+    """The genes `genes` of `adata` (a view), with a warning for the genes it lacks."""
     if isinstance(genes, str):
-        raise TypeError("`data` must be an AnnData or a list of gene symbols.")
+        raise TypeError("`genes` must be a list of gene names, not a string.")
     genes = list(dict.fromkeys(genes))
     if not all(isinstance(g, str) for g in genes):
-        raise TypeError("`data` must be an AnnData or a list of gene symbols.")
-    if expression is None:
-        raise ValueError(
-            "With a gene list, pass `expression`, an AnnData of raw counts from a similar tissue with gene positions."
-        )
-    known = expression.var_names.isin(genes)
+        raise TypeError("`genes` must be a list of gene names.")
+    known = adata.var_names.isin(genes)
     if not known.any():
-        raise ValueError("None of the genes are in `expression.var_names`.")
-    if not expression.var_names[known].is_unique:
-        raise ValueError("Some panel genes occur more than once in `expression.var_names`; make the names unique.")
-    if missing := sorted(set(genes) - set(expression.var_names[known])):
+        raise ValueError("None of the `genes` are in `adata.var_names`.")
+    if not adata.var_names[known].is_unique:
+        raise ValueError("Some of the `genes` occur more than once in `adata.var_names`; make the names unique.")
+    if missing := sorted(set(genes) - set(adata.var_names[known])):
         warnings.warn(
-            f"{len(missing)} of {len(genes)} panel genes are not in `expression` and are left out: "
+            f"{len(missing)} of {len(genes)} genes are not in `adata.var_names` and are left out: "
             f"{', '.join(missing[:10])}{', ...' if len(missing) > 10 else ''}",
             UserWarning,
             skip_file_prefixes=SKIP_OWN_FRAMES,
         )
-    return expression[:, known]
+    return adata[:, known]
 
 
 def _counts(adata: AnnData, layer: str | None) -> sp.csr_matrix:
     """The raw counts as a canonical CSR matrix, after checking that they are counts."""
     if layer is not None and layer not in adata.layers:
-        raise ValueError(f"`layer={layer!r}` is not in `adata.layers`.")
+        raise KeyError(f"`layer={layer!r}` is not in `adata.layers`.")
     X = _kernel_ready(sp.csr_matrix(_as_matrix(adata.X if layer is None else adata.layers[layer], "the raw counts")))
     if X.data.size and (X.data.min() < 0 or np.any(X.data != np.round(X.data))):
         raise ValueError(
@@ -536,13 +553,23 @@ def _gene_arms(var: pd.DataFrame, centromeres, exclude: list[str]) -> tuple[np.n
             "Genomic positions not found: `var` needs the columns `chromosome` and `start`, e.g. from "
             "`infercnvpy.io.genomic_position_from_gtf`."
         )
-    cen = {c: pos for c, pos in (HG38_CENTROMERES if centromeres is None else centromeres).items() if c not in exclude}
+    if isinstance(centromeres, str) and centromeres != "hg38":
+        raise ValueError(f'`centromeres` must be "hg38" or a mapping of chromosome to position, got {centromeres!r}.')
+    hg38 = isinstance(centromeres, str)
+    cen = {c: pos for c, pos in (_HG38_CENTROMERES if hg38 else centromeres).items() if c not in exclude}
     chrom = np.asarray(var["chromosome"]).astype(str)
     start = pd.to_numeric(np.asarray(var["start"]), errors="coerce")
     centre = np.array([cen.get(c, np.nan) for c in chrom])
     known = np.isfinite(centre) & np.isfinite(start)
     if not known.any():
         raise ValueError("No gene is on a chromosome of `centromeres`; check the names in `var['chromosome']`.")
+    if hg38 and (beyond := int((start[known] > np.array([HG38_LENGTHS[c] for c in chrom[known]])).sum())):
+        warnings.warn(
+            f"{beyond} genes start beyond the end of their GRCh38 chromosome. Are the positions from another genome "
+            "build? Pass its centromeres as `centromeres`.",
+            UserWarning,
+            skip_file_prefixes=SKIP_OWN_FRAMES,
+        )
     label = np.where(known, np.char.add(chrom, np.where(start < centre, "p", "q")), "")
     skip = _ACROCENTRIC_P | {f"{c}p" for c, pos in cen.items() if pos <= 0}
     present = set(label[known])
@@ -555,7 +582,7 @@ def _groups(adata: AnnData, groupby: str | None) -> pd.Categorical[Any]:
     if groupby is None:
         return pd.Categorical(np.full(adata.n_obs, "all"))
     if groupby not in adata.obs.columns:
-        raise ValueError(f"`groupby={groupby!r}` is not a column of `adata.obs`.")
+        raise KeyError(f"`groupby={groupby!r}` is not a column of `adata.obs`.")
     col = _obs_column(adata, groupby).astype("category").cat.remove_unused_categories()
     if col.isna().any():
         raise ValueError(f"`obs[{groupby!r}]` has missing values; give every cell a group.")
@@ -563,17 +590,17 @@ def _groups(adata: AnnData, groupby: str | None) -> pd.Categorical[Any]:
 
 
 def _reference(adata: AnnData, reference_key: str | None, reference_cat) -> np.ndarray:
-    """Whether each cell is a diploid reference cell."""
+    """Whether each cell is a normal reference cell."""
     is_ref = _reference_cells(adata, reference_key, reference_cat)
     if is_ref is None:
         warnings.warn(
             "Measuring the null variance on all cells, which counts real copy number changes as noise. Pass "
-            "`reference_key` and `reference_cat` to measure it on diploid cells.",
+            "`reference_key` and `reference_cat` to measure it on normal cells.",
             UserWarning,
             skip_file_prefixes=SKIP_OWN_FRAMES,
         )
         return np.ones(adata.n_obs, dtype=bool)
-    if not is_ref.any():
+    if not is_ref.any():  # reference_cat=[] selects no cells without an error in _reference_cells
         raise ValueError(f"`reference_cat={reference_cat!r}` selects no cells.")
     return is_ref
 
