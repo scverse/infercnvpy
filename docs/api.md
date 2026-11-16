@@ -73,8 +73,8 @@ Which function to use:
   with a weight estimated from the data. With fewer than 1,000 usable genes (small panels such as Xenium 480) or a
   median below 150 counts per cell, it labels the cells `"undetermined"` instead of calling them; use `tl.infercnv`
   there.
-- {func}`~infercnvpy.tl.detectability` doesn't infer copy number. Run it before an experiment, on a gene list, or
-  afterwards, on the data, to see which chromosome arms the panel and depth can resolve, and in how many cells.
+- {func}`~infercnvpy.tl.detectability` estimates which chromosome arms a panel and depth can resolve, and in how
+  many cells. Run it on a gene list before an experiment, or on the data afterwards.
 
 Both write their profiles to `adata.obsm` and `adata.uns` in the same layout, so the plots, scores, embeddings and
 spatial tools below accept the output of either (`use_rep="cnv"` or `use_rep="copy_number"`).
@@ -92,9 +92,9 @@ spatial tools below accept the output of either (`use_rep="cnv"` or `use_rep="co
 
 ### Detectability
 
-Which copy number changes a gene panel and depth can detect, per chromosome arm and in how many cells.
-Use it before an experiment, with a gene list and expression from a similar dataset, to choose a panel and depth,
-or afterwards, on the data, to see which arms the CNV calls can be trusted on.
+{func}`~infercnvpy.tl.detectability` estimates which copy number changes of each chromosome arm a gene panel and depth
+can detect, and in how many cells. Use it with a gene list before an experiment to choose a panel and depth, and on
+the data afterwards to see on which arms the CNV calls can be trusted.
 
 ```{eval-rst}
 .. autosummary::

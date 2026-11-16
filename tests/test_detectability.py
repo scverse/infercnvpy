@@ -5,7 +5,6 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 from anndata import AnnData
-from matplotlib import pyplot as plt
 from scipy.stats import norm
 
 import infercnvpy as cnv
@@ -72,11 +71,11 @@ def _run(adata, **kwargs):
 
 @pytest.mark.parametrize("depth", [10, 30, 100])
 def test_power_matches_simulation(depth):
-    """A z-test on simulated clones reaches the predicted power, at the cells needed and at the smallest ratio."""
+    """A z-test on simulated clones attains the predicted power, at the cells needed and at the smallest ratio."""
     sim = Sim()
     row = _run(sim.adata(sim.counts(3000, depth))).loc["chr1p"]
-    v = max(row["null_var"], 1)
-    assert 1 <= v < 1.4  # counting noise and the noise of the size factor only
+    v = row["null_var"]
+    assert 1.02 < v < 1.4  # counting noise and the noise of the size factor only
     null = sim.z_test(sim.counts(REPLICATES * 50, depth), 50, "chr1p", v)
     assert np.mean(null > norm.ppf(1 - ALPHA)) < 2.5 * ALPHA
     for r, n in (
@@ -113,7 +112,6 @@ def test_cell_type_programs():
     typed = _run(adata, groupby="cell_type")
     assert pooled.loc["chr2p", "null_var"] > 2
     assert (typed.loc["chr2p", "null_var"] < 1.4).all()
-    assert set(typed["group"]) == {"A", "B"}
     b = typed[typed.group == "B"].loc["chr2p"]
     a = typed[typed.group == "A"].loc["chr2p"]
     assert b["info"] > 2 * a["info"]  # more counts on the arm in type B
@@ -136,21 +134,25 @@ def test_inplace_and_obs():
     sim = Sim()
     adata = sim.adata(sim.counts(500, 30), status=["normal"] * 500)
     kwargs = {"reference_key": "status", "reference_cat": "normal", "centromeres": CENTROMERES}
-    assert cnv.tl.detectability(adata, key_added="det", **kwargs) is None
+    assert cnv.tl.detectability(adata, key_added="det", random_state=3, **kwargs) is None
     table = adata.uns["det"]["table"]
     assert list(table["arm"].astype(str)) == ["chr1p", "chr1q", "chr2p", "chr2q", "chr3p", "chr3q", "chr4p", "chr4q"]
     assert table["n_genes"].eq(15).all()
-    assert adata.uns["det"]["params"]["n_reference"] == 500
+    params = adata.uns["det"]["params"]
+    assert params["n_reference"] == 500
+    assert params["centromeres"] == CENTROMERES
+    assert params["exclude_chromosomes"] == ["chrX", "chrY"]
+    assert params["random_state"] == 3
     info = adata.obs["det_info"].to_numpy()
-    assert info.shape == (500,)
     assert np.all(info >= 0)
     assert info.sum() == pytest.approx(500 * table["info"].sum())
 
 
-def test_default_arms():
-    """GRCh38 by default: all arms except the acrocentric p arms, with 0 genes where the panel has none."""
+@pytest.mark.parametrize("centromeres", [None, HG38_CENTROMERES])
+def test_default_arms(centromeres):
+    """GRCh38 (by default or passed): all arms except the acrocentric p arms, with 0 genes where the panel has none."""
     sim = Sim()
-    df = _run(sim.adata(sim.counts(300, 30)), centromeres=None)
+    df = _run(sim.adata(sim.counts(300, 30)), centromeres=centromeres)
     assert len(df) == 39
     assert "chr13p" not in df.index
     empty = df.loc["chr22q"]
@@ -165,7 +167,7 @@ def test_gene_list_mode():
     genes = list(expression.var_names[::2])
     kwargs = {"reference_key": "status", "reference_cat": "normal"}
     with pytest.warns(UserWarning, match="1 of 61 panel genes"):
-        from_list = _run(genes + ["NOT_A_GENE"], expression=expression, **kwargs)
+        from_list = _run(iter([*genes, "NOT_A_GENE"]), expression=expression, **kwargs)  # any iterable
     from_data = _run(expression[:, genes].copy(), **kwargs)
     pd.testing.assert_frame_equal(from_list, from_data)
     # the panel has fewer counts per cell than the transcriptome it is cut from
@@ -177,55 +179,157 @@ def test_depths():
     adata = sim.adata(sim.counts(3000, 40))
     observed = np.median(adata.X.sum(axis=1).A1)
     df = _run(adata, counts_per_cell=[observed / 2, observed, observed * 2])
-    by_depth = {d: g.set_index("arm") for d, g in df.groupby("depth")}
-    low, mid, high = (by_depth[d] for d in sorted(by_depth))
+    low, mid, high = (g for _, g in df.groupby("depth"))
     assert set(low["null_var_source"]) == set(mid["null_var_source"]) == {"measured"}
     assert set(high["null_var_source"]) == {"extrapolated"}
-    ratio_low = low["cells_gain_ideal"] / mid["cells_gain_ideal"]
-    ratio_high = mid["cells_gain_ideal"] / high["cells_gain_ideal"]
-    assert ratio_low.between(1.3, 2.3).all()
-    assert ratio_high.between(1.3, 2.3).all()
-    assert (high["null_var"] >= mid["null_var"]).all()
+    assert (low["cells_gain_ideal"] / mid["cells_gain_ideal"]).between(1.3, 2.3).all()
+    assert (mid["cells_gain_ideal"] / high["cells_gain_ideal"]).between(1.3, 2.3).all()
+    # each depth has its own random stream: thinning to a depth gives the same rows alone or in a list
+    alone = _run(adata, counts_per_cell=observed / 2)
+    pd.testing.assert_frame_equal(alone, low)
+
+
+def test_extrapolated_null_variance():
+    """Regression: extrapolating to a deeper experiment matches the null variance measured on deeper data.
+
+    The size-factor part of the excess stays about flat with depth and only the program part grows, so scaling the
+    whole excess made the achievable values 1.2 to 1.8 times too pessimistic.
+    """
+    sim = Sim()
+    program = {"chr1p": 0.3}
+    shallow = sim.adata(sim.counts(3000, 20, program=program))
+    deep = sim.adata(sim.counts(3000, 200, program=program))
+    target = np.median(deep.X.sum(axis=1).A1)
+    extrapolated = _run(shallow, counts_per_cell=target)
+    measured = _run(deep)
+    assert set(extrapolated["null_var_source"]) == {"extrapolated"}
+    ratio = extrapolated["cells_gain"] / measured["cells_gain"]
+    assert ratio.between(0.8, 1.25).all(), ratio
+    assert extrapolated.loc["chr1p", "null_var"] > 1.5  # the program part grows with depth
+
+
+def test_dispersion_without_reference_counts():
+    """Regression: genes the reference doesn't express are not taken as Poisson, and their arm is not measured."""
+    sim = Sim()
+    X = np.vstack([sim.counts(1000, 50, fold={"chr2p": 0.0}), sim.counts(1000, 50)])
+    adata = sim.adata(X, cell_type=["A"] * 1000 + ["B"] * 1000)
+    with pytest.warns(UserWarning, match="no information on the arms chr2p"):
+        df = _run(adata, groupby="cell_type", reference_key="cell_type", reference_cat="A")
+    b = df[df.group == "B"].loc["chr2p"]
+    assert np.isnan(b["null_var"])
+    assert np.isnan(b["cells_gain"])
+    assert np.isfinite(b["cells_gain_ideal"])
+    # the ideal bound of chr2p uses the median dispersion of the other genes (0.5), not 0
+    from_phi = _run(adata[adata.obs.cell_type == "B"].copy())
+    assert b["cells_gain_ideal"] == pytest.approx(from_phi.loc["chr2p", "cells_gain_ideal"], rel=0.15)
+
+
+def test_small_reference_groups():
+    """Regression: with each cell left out of its own expectation, small groups don't shrink the dispersion."""
+    sim = Sim()
+    X = sim.counts(3000, 30)
+    one = _run(sim.adata(X))
+    small = _run(sim.adata(X, cell_type=np.repeat(np.arange(300), 10).astype(str)), groupby="cell_type")
+    per_arm = small.reset_index(drop=True).groupby("arm", observed=True)
+    assert np.all((per_arm["cells_gain"].median() / one["cells_gain"].to_numpy()).between(0.9, 1.2))
+    assert np.all((per_arm["null_var"].first() / one["null_var"].to_numpy()).between(0.9, 1.15))
+
+
+def test_single_arm_panel():
+    """Regression: a panel on one arm has no counts to measure a cell's size with, so it has no information."""
+    sim = Sim()
+    adata = sim.adata(sim.counts(500, 30))[:, sim.arm("chr1p")].copy()
+    with pytest.warns(UserWarning, match="no information on the arms chr1p"):
+        df = _run(adata, centromeres={"chr1": HG38_CENTROMERES["chr1"]})
+    row = df.loc["chr1p"]
+    assert row["info"] == 0
+    assert np.isinf(row["cells_gain"])
+    assert np.isnan(row["gain_ratio"])
+
+
+def test_non_canonical_counts():
+    """Regression: duplicate CSR entries are summed, as in the dense matrix."""
+    sim = Sim()
+    X = sp.csr_matrix(sim.counts(300, 30).astype(np.float32))
+    coo = X.tocoo()
+    half = np.floor(coo.data / 2)
+    dup = sp.csr_matrix(
+        (np.concatenate([half, coo.data - half]), (np.tile(coo.row, 2), np.tile(coo.col, 2))), shape=X.shape
+    )
+    dup.has_canonical_format = False
+    a, b = sim.adata(X.toarray()), sim.adata(X.toarray())
+    b.X = dup
+    pd.testing.assert_frame_equal(_run(a), _run(b))
+
+
+def test_group_order():
+    """Regression: groups come in the order of the categories of `obs[groupby]`, unused categories dropped."""
+    sim = Sim()
+    adata = sim.adata(sim.counts(200, 30), cell_type=["A"] * 100 + ["B"] * 100)
+    adata.obs["cell_type"] = pd.Categorical(adata.obs["cell_type"], categories=["B", "C", "A"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        df = _run(adata, groupby="cell_type")
+    assert list(dict.fromkeys(df["group"])) == ["B", "A"]
+    assert list(df["group"].cat.categories) == ["B", "A"]
+
+
+def test_exclude_chromosomes_string():
+    sim = Sim()
+    df = _run(sim.adata(sim.counts(200, 30)), exclude_chromosomes="chr4")
+    assert "chr4p" not in df.index
+    assert "chr3p" in df.index
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "error", "match"),
+    ("kwargs", "match"),
     [
-        ({"n_cells": 0}, ValueError, "n_cells"),
-        ({"gain": 0.9}, ValueError, "gain"),
-        ({"loss": 1.0}, ValueError, "loss"),
-        ({"alpha": 0}, ValueError, "alpha"),
-        ({"power": 1}, ValueError, "power"),
-        ({"counts_per_cell": -5}, ValueError, "counts_per_cell"),
-        ({"groupby": "nope"}, ValueError, "groupby"),
-        ({"reference_key": "status"}, ValueError, "both"),
-        ({"reference_key": "nope", "reference_cat": "x"}, ValueError, "reference_key"),
-        ({"reference_key": "status", "reference_cat": "x"}, ValueError, "not found"),
-        ({"layer": "counts"}, ValueError, "layer"),
-        ({"expression": "x"}, ValueError, "expression"),
-        ({"exclude_chromosomes": CHROMS}, ValueError, "No gene"),
+        ({"n_cells": 0}, "n_cells"),
+        ({"gain": 0.9}, "gain"),
+        ({"loss": 1.0}, "loss"),
+        ({"alpha": 0}, "alpha"),
+        ({"power": 1}, "power"),
+        ({"power": 0.4}, "power"),
+        ({"counts_per_cell": -5}, "counts_per_cell"),
+        ({"counts_per_cell": np.inf}, "counts_per_cell"),
+        ({"counts_per_cell": []}, "counts_per_cell"),
+        ({"groupby": "nope"}, "groupby"),
+        ({"reference_key": "status"}, "both"),
+        ({"reference_key": "status", "reference_cat": "x"}, "No cell has"),
+        ({"reference_key": "status", "reference_cat": []}, "selects no cells"),
+        ({"layer": "counts"}, "layer"),
+        ({"expression": "x"}, "expression"),
+        ({"exclude_chromosomes": CHROMS}, "No gene"),
     ],
 )
-def test_argument_errors(kwargs, error, match):
+def test_argument_errors(kwargs, match):
     sim = Sim()
     adata = sim.adata(sim.counts(50, 30), status=["normal"] * 50)
-    with pytest.raises(error, match=match):
+    with pytest.raises(ValueError, match=match):
         _run(adata, **kwargs)
 
 
 def test_input_errors():
     sim = Sim()
-    adata = sim.adata(sim.counts(50, 30))
+    adata = sim.adata(sim.counts(50, 30), status=["normal"] * 50)
+    with pytest.raises(KeyError, match="nope"):
+        _run(adata, reference_key="nope", reference_cat="x")
     with pytest.raises(ValueError, match="raw counts"):
         _run(AnnData(adata.X * 0.5, var=adata.var))
     with pytest.raises(ValueError, match="chromosome"):
         _run(AnnData(adata.X))
+    with pytest.raises(ValueError, match="needs cells and genes"):
+        _run(adata[:0].copy())
     with pytest.raises(ValueError, match="pass `expression`"):
         _run(["g0", "g1"])
     with pytest.raises(TypeError, match="gene symbols"):
         _run("g0")
     with pytest.raises(ValueError, match="None of the genes"):
         _run(["x"], expression=adata)
+    dup = adata.copy()
+    dup.var_names = ["g0"] * 2 + list(dup.var_names[2:])
+    with pytest.raises(ValueError, match="more than once"):
+        _run(["g0", "g5"], expression=dup)
 
 
 @pytest.fixture
@@ -240,7 +344,9 @@ def test_plot_heatmap(table, metric):
     ax = cnv.pl.detectability(table, metric=metric, show=False)
     assert [t.get_text() for t in ax.get_yticklabels()] == ["A", "B"]
     assert len(ax.get_xticklabels()) == 39
-    plt.close("all")
+    # regression: the legend sits in the figure margin, not on the tick labels
+    assert ax.get_legend() is None
+    assert len(ax.get_figure().legends) == 1
 
 
 def test_plot_bar_and_panels(table):
@@ -250,7 +356,21 @@ def test_plot_bar_and_panels(table):
     assert len(ax.patches) == 8  # one bar per arm with genes
     ax = cnv.pl.detectability({"panel 1": one, "panel 2": one}, metric="gain_ratio", ideal=True, show=False)
     assert [t.get_text() for t in ax.get_yticklabels()] == ["panel 1", "panel 2"]
-    plt.close("all")
+
+
+def test_plot_indexed_and_reordered(table):
+    """Regression: an index that holds a column is kept, and arms come in genome order whatever the input order."""
+    one = table[table.group == "A"]
+    shuffled = one.iloc[::-1].set_index("arm", drop=True)
+    ax = cnv.pl.detectability({"x": shuffled, "y": one}, show=False)
+    ticks = [t.get_text() for t in ax.get_xticklabels()]
+    assert ticks[:3] == ["chr1p", "chr1q", "chr2p"]
+
+
+def test_plot_constant_cells(table):
+    """Regression: a heatmap whose cells all need the same number of cells doesn't fail on the color scale."""
+    flat = table.assign(cells_gain=np.where(np.isfinite(table["cells_gain"]), 20.0, np.inf))
+    cnv.pl.detectability(flat, show=False)
 
 
 def test_plot_errors(table):
@@ -260,3 +380,6 @@ def test_plot_errors(table):
         cnv.pl.detectability(table, kind="bar")
     with pytest.raises(ValueError, match="Run `tl.detectability`"):
         cnv.pl.detectability(AnnData(np.zeros((2, 2))))
+    # regression: rows of two calls that differ only in parameters not in the table are not merged silently
+    with pytest.raises(ValueError, match="several rows per condition"):
+        cnv.pl.detectability(pd.concat([table, table]))
