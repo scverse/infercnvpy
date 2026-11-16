@@ -94,7 +94,8 @@ spatial tools below accept the output of either (`use_rep="cnv"` or `use_rep="co
 
 {func}`~infercnvpy.tl.detectability` estimates which copy number changes of each chromosome arm a gene panel and depth
 can detect, and in how many cells. Use it with a gene list before an experiment to choose a panel and depth, and on
-the data afterwards to see on which arms the CNV calls can be trusted.
+the data afterwards to see on which arms the CNV calls can be trusted. On Atera breast panel cuts, its achievable
+column matched an ideal test, and `tl.infercnv` needed about 2 to 8 times as many cells, more on smaller panels.
 
 ```{eval-rst}
 .. autosummary::

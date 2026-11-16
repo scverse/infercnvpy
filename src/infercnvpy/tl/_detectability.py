@@ -97,10 +97,28 @@ def detectability(
     ratio `r` when `|r - 1| sqrt(n) I >= sqrt(v) (z_alpha sqrt(I) + z_power sqrt(r A + r^2 B))`. Solved for `n`, the
     condition gives the cells needed, and solved for `r` the smallest detectable ratio. The test treats cells as
     independent, so a program shared by all cells of a clone (a tumour state, for example) is not averaged away by
-    more cells. It is the bound for a method that knows the diploid expression of every cell type. Methods that
-    estimate the expression from the data do worse. In our simulations on imaging panels,
-    :func:`infercnvpy.tl.infercnv` achieved about 0.6 of the z of this test and needed about 3 times the cells. The
-    factor is not yet calibrated per platform.
+    more cells. It is the bound for a method that knows the diploid expression of every cell type, and methods that
+    estimate the expression from the data need more cells.
+
+    **Calibration.** We injected arm gains of 1.5x and losses of 0.5x into normal cells of an Atera breast sample
+    (fibroblasts, normal epithelium and one tumour clone), cut to five panels at two depths. An ideal score test with
+    the true expected expression needed 0.6 to 1.1 times the cells of the achievable column, and the two rank the arms
+    alike (Spearman 0.98 to 0.99). The ideal column over-promises by up to about 3 times on deep, wide panels, where
+    the null variance is largest. :func:`infercnvpy.tl.infercnv` needed more cells than the achievable column, by a
+    factor that depends on the panel:
+
+    ===============================  ==============================
+    panel                            cells relative to `cells_gain`
+    ===============================  ==============================
+    whole transcriptome              about 2 to 5 times
+    Xenium 5K                        about 2 to 6 times
+    1,000 genes or fewer             about 3 to 8 times
+    ===============================  ==============================
+
+    On panels of 1,000 genes or fewer, `tl.infercnv` missed about a third of the arm events at any number of cells.
+    When many arms change at once, it also shifts arms without a change, by smoothing over arm borders and by
+    centring each cell. :func:`infercnvpy.tl.copy_number` detects clones rather than single arms, so the table
+    doesn't apply to it, and on panels below its guard it labels the cells "undetermined".
 
     **Depths.** With `counts_per_cell`, the counts are thinned at random to each target median per cell, and the null
     variance and information are measured again with the same expected shares and dispersions. A target above the
