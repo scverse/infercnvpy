@@ -34,6 +34,13 @@ def _logging_state():
     log_config.verbosity = verbosity_orig
 
 
+@pytest.fixture(autouse=True)
+def _close_figures():
+    """Close figures a test leaves open, so tests that count open figures don't depend on the order."""
+    yield
+    plt.close("all")
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--internet-tests",
