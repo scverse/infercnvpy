@@ -243,6 +243,90 @@ def row_stats(data, indices, indptr, row0, min_genes, ndet, det):
                         det[ch, indices[k]] += 1
 
 
+@njit
+def _row_scale(data, indices, indptr, row, col_map):
+    """`1e4 / size` of a cell, `size` being its count over the used genes (`col_map >= 0`), at least 1."""
+    size = 0.0
+    for k in range(indptr[row], indptr[row + 1]):
+        if col_map[indices[k]] >= 0:
+            size += data[k]
+    return 1e4 / max(size, 1.0)
+
+
+@njit_parallel
+def log_moments(data, indices, indptr, rws, col_map, s0, s1, s2):
+    """Per gene, the cells that detect it (`s0`) and the sums of `v` (`s1`) and `v^2` (`s2`) over cells.
+
+    `v = log1p(1e4 x count / size)` as in `project_rows`; zeros add nothing. One slab per chunk of rows (chunks x
+    genes); the number of chunks is fixed by the caller, so that the sums don't depend on the number of threads.
+    """
+    n_chunks = s1.shape[0]
+    n_rows = rws.shape[0]
+    step = (n_rows + n_chunks - 1) // n_chunks
+    for ch in prange(n_chunks):
+        for r in range(ch * step, min(n_rows, (ch + 1) * step)):
+            f = _row_scale(data, indices, indptr, rws[r], col_map)
+            for k in range(indptr[rws[r]], indptr[rws[r] + 1]):
+                g = col_map[indices[k]]
+                if g >= 0 and data[k] > 0:
+                    v = math.log1p(data[k] * f)
+                    s0[ch, g] += 1.0
+                    s1[ch, g] += v
+                    s2[ch, g] += v * v
+
+
+@njit_parallel
+def gram_sparse(data, indices, indptr, rws, col_map, hvg_of_gene, out):
+    """Add `x x^T` of each cell's highly variable genes to the upper triangle of `out[chunk]` (chunks x p x p).
+
+    `x` holds `log1p(1e4 x count / size)` as in `project_rows`. The work per cell is its number of nonzero highly
+    variable genes squared, so this suits sparse rows; one slab per chunk of rows, summed by the caller.
+    """
+    n_chunks = out.shape[0]
+    n_rows = rws.shape[0]
+    step = (n_rows + n_chunks - 1) // n_chunks
+    for ch in prange(n_chunks):
+        hs = np.empty(out.shape[1], dtype=np.int64)
+        vs = np.empty(out.shape[1])
+        for r in range(ch * step, min(n_rows, (ch + 1) * step)):
+            f = _row_scale(data, indices, indptr, rws[r], col_map)
+            m = 0
+            for k in range(indptr[rws[r]], indptr[rws[r] + 1]):
+                g = col_map[indices[k]]
+                if g >= 0 and data[k] > 0:
+                    h = hvg_of_gene[g]
+                    if h >= 0:
+                        hs[m] = h
+                        vs[m] = math.log1p(data[k] * f)
+                        m += 1
+            for a in range(m):
+                ha, va = hs[a], vs[a]
+                for b in range(a, m):
+                    hb = hs[b]
+                    if ha <= hb:
+                        out[ch, ha, hb] += va * vs[b]
+                    else:
+                        out[ch, hb, ha] += va * vs[b]
+
+
+@njit_parallel
+def hvg_rows(data, indices, indptr, rws, col_map, hvg_of_gene, out, n_chunks):
+    """`out[r, h] = log1p(1e4 x count / size)` of the cell's highly variable gene `h`, 0 elsewhere (dense rows)."""
+    n_rows = out.shape[0]
+    step = (n_rows + n_chunks - 1) // n_chunks
+    for ch in prange(n_chunks):
+        for r in range(ch * step, min(n_rows, (ch + 1) * step)):
+            for h in range(out.shape[1]):
+                out[r, h] = 0.0
+            f = _row_scale(data, indices, indptr, rws[r], col_map)
+            for k in range(indptr[rws[r]], indptr[rws[r] + 1]):
+                g = col_map[indices[k]]
+                if g >= 0:
+                    h = hvg_of_gene[g]
+                    if h >= 0:
+                        out[r, h] = math.log1p(data[k] * f)
+
+
 @njit_parallel
 def project_rows(data, indices, indptr, rws, col_map, hvg_of_gene, loadings, out, n_chunks):
     """`out[r] = sum over the cell's highly variable genes of log1p(1e4 x count / size) x loadings[hvg]`.
@@ -255,11 +339,7 @@ def project_rows(data, indices, indptr, rws, col_map, hvg_of_gene, loadings, out
         for r in range(ch * step, min(n_rows, (ch + 1) * step)):
             for p in range(P):
                 out[r, p] = 0.0
-            size = 0.0
-            for k in range(indptr[rws[r]], indptr[rws[r] + 1]):
-                if col_map[indices[k]] >= 0:
-                    size += data[k]
-            f = 1e4 / max(size, 1.0)
+            f = _row_scale(data, indices, indptr, rws[r], col_map)
             for k in range(indptr[rws[r]], indptr[rws[r] + 1]):
                 g = col_map[indices[k]]
                 if g >= 0:

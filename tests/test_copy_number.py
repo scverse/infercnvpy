@@ -105,6 +105,30 @@ def test_count_kernels_match_references():
         np.testing.assert_allclose(ll2[r, 0], _nb_loglik(Y[r], size[r], mix, phi))
 
 
+@pytest.mark.parametrize(("sparse_gram", "dense_eigh"), [(0.0, 500), (1.0, 500), (1.0, 100)])
+def test_expression_pcs_match_dense_pca(monkeypatch, sparse_gram, dense_eigh):
+    """The PCA from the Gram matrix (sparse or dense rows; full or Lanczos eigensolver) is the PCA of the dense matrix."""
+    monkeypatch.setattr(M, "_SPARSE_GRAM", sparse_gram)
+    monkeypatch.setattr(M, "_DENSE_EIGH", dense_eigh)
+    monkeypatch.setattr(M, "_N_HVG", 300)
+    adata = _simulate(n_tumour=150, n_normal=150, depth=800)
+    cells, lay, *_ = _layout(adata)
+    data = M._Data(_Rows(adata.X, 70), cells, lay, 10)
+    pcs = data.expression_pcs()
+    X = adata.X[cells][:, lay.order].toarray().astype(np.float64)
+    X = np.log1p(X * (1e4 / np.maximum(X.sum(axis=1), 1))[:, None])
+    v = X.var(axis=0)
+    hvg = np.sort(np.argsort(-v, kind="stable")[:300])
+    np.testing.assert_array_equal(np.flatnonzero(data.hvg_of_gene >= 0), hvg)
+    D = X[:, hvg] - X[:, hvg].mean(axis=0)
+    V = np.linalg.svd(D, full_matrices=False)[2][:30].T
+    cos = np.linalg.svd(V.T @ data.loadings, compute_uv=False)
+    assert cos.min() > 1 - 1e-8  # the same subspace
+    np.testing.assert_allclose(np.abs(pcs[:, :5]), np.abs(D @ V[:, :5]), atol=1e-6)
+    peak = data.loadings[np.abs(data.loadings).argmax(axis=0), np.arange(30)]
+    assert (peak > 0).all()  # sign convention
+
+
 @pytest.mark.parametrize("n", [300, 3000, 1e6])
 def test_spillover_is_the_likelihood_maximum(n):
     """Large `g / a` (a tumour-specific window) made the Newton steps stop near 0."""

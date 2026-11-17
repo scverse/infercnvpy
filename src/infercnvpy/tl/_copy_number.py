@@ -22,6 +22,7 @@ from anndata import AnnData
 from scipy.cluster import hierarchy
 from scipy.ndimage import median_filter
 from scipy.optimize import nnls
+from scipy.sparse.linalg import eigsh
 from scipy.spatial.distance import squareform
 
 from infercnvpy._logging import log, log_result
@@ -73,10 +74,12 @@ _P_NEUTRAL = 0.5  # prior probability of the neutral state
 _NU = 1.5  # degrees of freedom of the t emissions
 _N_HVG = 2000
 _N_PCS = 30
-_N_SUB = 20000  # cells for the expression PCA
 _BLOCK = 25  # genes per block of the genomic statistics (flatness, smooth amplitude, mode); fewer on small panels
 _MIN_CLONE = 5
-_EXACT_SVD = 10_000  # cells up to which the expression PCA uses an SVD (above: eigendecomposition)
+_PCA_CHUNKS = 16  # row chunks of the sums of the expression PCA: fixed, so that the PCs don't depend on `n_jobs`
+_GRAM_CHUNKS = 4  # row chunks (p x p slabs) of the Gram matrix from sparse rows
+_SPARSE_GRAM = 0.1  # share of nonzeros in the highly variable genes below which the Gram matrix uses the sparse rows
+_DENSE_EIGH = 500  # highly variable genes up to which the PCA uses a full eigendecomposition (above: Lanczos)
 _DOSAGE_PRIOR = 1.0  # strength of the shrinkage of dosage weights towards 1, in median gene precisions
 _MIN_PRIOR = 0.01  # smallest prior clone probability of a cell type
 _NP_SWEEPS = 1000  # most updates of the spatial posteriors
@@ -267,7 +270,7 @@ def copy_number(
     chunksize
         Number of cells processed at a time.
     random_state
-        Seed for subsampling and k-means.
+        Seed of the k-means starts (and of the sample of `max_fit_cells`).
     key_added
         Name of the results in `adata.obs`, `adata.obsm` and `adata.uns`.
     inplace
@@ -423,7 +426,7 @@ def copy_number(
 
         # expression clusters and their pooled profiles
         n_clusters = n_clusters or int(np.clip(n_fit // 50, 8, 40))
-        pcs = data.expression_pcs(rng)
+        pcs = data.expression_pcs()
         ref_fit = None if is_ref is None else is_ref[cells[fit]]
         if ref_fit is None:
             clusters = _kmeans(pcs, min(n_clusters, n_fit), rng)
@@ -818,14 +821,6 @@ class _Data:
         self.Yw = np.concatenate(Yw)
         self.size = self.Yw.sum(axis=1, dtype=np.float64)
 
-    def blocks(self, rows: np.ndarray | None = None):
-        """Yield `(i0, i1, X)`: positions `i0:i1` in `rows` (default: all cells) and their counts (CSR, genomic order)."""
-        rows = self.cells if rows is None else rows
-        i0 = 0
-        for X, rws in self.source.rows_of(rows):
-            yield i0, i0 + len(rws), _csr(X)[rws][:, self.lay.order].astype(np.float64)
-            i0 += len(rws)
-
     def pooled(self, labels: np.ndarray, k: int | None = None, lay=None):
         """Pooled gene counts (k x genes of `lay`, default: the model's) and pooled size factors of each label."""
         lay = self.lay if lay is None else lay
@@ -836,22 +831,40 @@ class _Data:
             K.pooled_counts(X.data, X.indices, X.indptr, rws, lay.col_map, labels[i0:i1], slabs)
         return slabs.sum(axis=0), np.bincount(labels, weights=self.size, minlength=k)
 
-    def expression_pcs(self, rng) -> np.ndarray:
-        """First principal components of log-normalised expression of the most variable genes."""
-        sub = _subsample(np.arange(len(self.cells)), _N_SUB, rng)
-        Xs = sp.vstack([Xb for _, _, Xb in self.blocks(self.cells[sub])]).tocsr()
-        Xs = sp.diags(1e4 / np.maximum(self.size[sub], 1)) @ Xs
-        Xs.data = np.log1p(Xs.data)
-        mean = np.asarray(Xs.mean(axis=0)).ravel()
-        var = np.asarray(Xs.multiply(Xs).mean(axis=0)).ravel() - mean**2
-        hvg = np.sort(np.argsort(var)[::-1][: min(_N_HVG, len(var))])
-        D = Xs[:, hvg].toarray() - mean[hvg]
-        n_pcs = max(1, min(_N_PCS, D.shape[0] - 1, D.shape[1]))
-        proj = _top_right_singular_vectors(D, n_pcs)
-        self.hvg_of_gene = np.full(self.lay.n_genes, -1, dtype=np.int64)
+    def expression_pcs(self) -> np.ndarray:
+        """First principal components of log-normalised expression of the most variable genes, from all cells.
+
+        Two passes over the counts: per-gene moments pick the highly variable genes, then their Gram matrix gives the
+        covariance (`G / n - mean mean^T`), so the centred matrix is never built. The Gram matrix is summed from the
+        sparse rows when they are sparse, else from dense blocks of rows with BLAS.
+        """
+        lay, n = self.lay, len(self.cells)
+        s = np.zeros((3, _PCA_CHUNKS, lay.n_genes))
+        for _, _, X, rws in _row_blocks(self.source, self.cells):
+            K.log_moments(X.data, X.indices, X.indptr, rws, lay.col_map, s[0], s[1], s[2])
+        det, s1, s2 = s.sum(axis=1)
+        mean = s1 / n
+        var = s2 / n - mean**2
+        hvg = np.sort(np.argsort(-var, kind="stable")[: min(_N_HVG, len(var))])
+        self.hvg_of_gene = np.full(lay.n_genes, -1, dtype=np.int64)
         self.hvg_of_gene[hvg] = np.arange(len(hvg))
+        p = len(hvg)
+        if det[hvg].sum() < _SPARSE_GRAM * n * p:
+            slabs = np.zeros((_GRAM_CHUNKS, p, p))
+            for _, _, X, rws in _row_blocks(self.source, self.cells):
+                K.gram_sparse(X.data, X.indices, X.indptr, rws, lay.col_map, self.hvg_of_gene, slabs)
+            G = np.triu(slabs.sum(axis=0))
+            G = G + np.triu(G, 1).T
+        else:
+            G = np.zeros((p, p))
+            for _, _, X, rws in _row_blocks(self.source, self.cells):
+                B = np.empty((len(rws), p))
+                K.hvg_rows(X.data, X.indices, X.indptr, rws, lay.col_map, self.hvg_of_gene, B, n_kernel_chunks(len(B)))
+                G += B.T @ B
+        mu = mean[hvg]
+        proj = _top_eigenvectors(G / n - np.outer(mu, mu), max(1, min(_N_PCS, n - 1, p)))
         self.loadings = np.ascontiguousarray(proj)
-        self.pc_offset = mean[hvg] @ proj
+        self.pc_offset = mu @ proj
         return self.project(self.source, self.cells)
 
     def project(self, source, rows) -> np.ndarray:
@@ -867,16 +880,20 @@ class _Data:
         return np.concatenate(out)
 
 
-def _top_right_singular_vectors(D: np.ndarray, k: int) -> np.ndarray:
-    """Top `k` right singular vectors of `D` (columns).
+def _top_eigenvectors(C: np.ndarray, k: int) -> np.ndarray:
+    """Eigenvectors of the `k` largest eigenvalues of the symmetric `C` (columns, largest first).
 
-    An exact SVD for up to `_EXACT_SVD` rows, else the eigenvectors of `D.T @ D` (exact too, and fast for many rows
-    and few columns).
+    Lanczos (`eigsh`, from a fixed start vector) for large `C`, else a full eigendecomposition; both are exact to
+    rounding. Each vector's largest entry is positive, so the result doesn't depend on the solver's signs.
     """
-    if D.shape[0] <= _EXACT_SVD:
-        return np.linalg.svd(D, full_matrices=False)[2][:k].T
-    w, vec = np.linalg.eigh(D.T @ D)
-    return vec[:, np.argsort(w)[::-1][:k]]
+    p = len(C)
+    if p <= _DENSE_EIGH or k >= p - 1:
+        w, vec = np.linalg.eigh(C)
+    else:
+        w, vec = eigsh(C, k=k, which="LA", v0=np.full(p, 1 / np.sqrt(p)))
+    vec = vec[:, np.argsort(-w, kind="stable")[:k]]
+    peak = vec[np.abs(vec).argmax(axis=0), np.arange(vec.shape[1])]
+    return vec * np.where(peak < 0, -1.0, 1.0)
 
 
 class _HMM:
