@@ -958,3 +958,10 @@ def test_short_chromosomes_have_both_window_parities():
     for g0, g in zip(lay.g0s, lay.gs, strict=True):
         assert set(parity[g0 : g0 + g]) == {0, 1}
 
+
+def test_copy_number_does_not_depend_on_n_jobs():
+    adata = _simulate(120, 80, n_chrom=4, genes=300)
+    a, b = (cnv.tl.copy_number(adata, n_restarts=1, n_jobs=n, inplace=False) for n in (1, 2))
+    pd.testing.assert_frame_equal(a[0], b[0], check_exact=True)
+    np.testing.assert_array_equal(a[1], b[1])
+

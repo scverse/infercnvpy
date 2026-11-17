@@ -15,7 +15,7 @@ from anndata import AnnData
 from scipy.stats import norm
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log_result
-from infercnvpy._numba import n_kernel_chunks, numba_threads
+from infercnvpy._numba import numba_threads
 from infercnvpy._util import _as_df, _as_matrix, _obs_column, _params_for_uns
 from infercnvpy.tl._copy_number import HG38_LENGTHS, _as_list, _reference_cells
 from infercnvpy.tl._detectability_kernels import _arm_information, _nb_moments
@@ -34,6 +34,7 @@ _HG38_CENTROMERES = {
 #: p arms of the acrocentric chromosomes, which hold no genes of their own: listed only when the panel has genes there
 _ACROCENTRIC_P = {"chr13p", "chr14p", "chr15p", "chr21p", "chr22p"}
 _MAX_PHI = 100.0  # cap of the NB dispersion 1 / k of a gene
+_CHUNKS = 16  # row chunks of the kernels' sums: fixed, so that the sums don't depend on `n_jobs`
 _MIN_REF_COUNTS = 20  # reference counts of a gene below which its dispersion is not trusted on its own
 
 
@@ -414,7 +415,7 @@ class _Model:
 
     def run(self, X: sp.csr_matrix, scale: float) -> _Fit:
         """Information of every group and arm, and the null sums of the reference cells, on the counts `X`."""
-        n_chunks = n_kernel_chunks(X.shape[0])
+        n_chunks = _CHUNKS
         sums = np.zeros((n_chunks, self.n_groups, 3, self.n_arms))
         null = np.zeros((n_chunks, 4, self.n_arms))
         cell_info = np.zeros(X.shape[0])
@@ -435,7 +436,7 @@ class _Model:
         Genes with fewer than `_MIN_REF_COUNTS` reference counts get at least the median dispersion of the others.
         """
         rows = np.flatnonzero(self.is_ref)
-        n_chunks = n_kernel_chunks(len(rows))
+        n_chunks = _CHUNKS
         n_codes, n_genes = self.p.shape
         xx, xm, dm, dm2 = (np.zeros((n_chunks, n_genes)) for _ in range(4))
         s1, s2 = np.zeros((n_chunks, n_codes, self.n_arms)), np.zeros((n_chunks, n_codes, self.n_arms))

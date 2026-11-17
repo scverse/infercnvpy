@@ -82,7 +82,7 @@ _N_HVG = 2000
 _N_PCS = 30
 _BLOCK = 25  # genes per block of the genomic statistics (flatness, smooth amplitude, mode); fewer on small panels
 _MIN_CLONE = 5
-_PCA_CHUNKS = 16  # row chunks of the sums of the expression PCA: fixed, so that the PCs don't depend on `n_jobs`
+_PCA_CHUNKS = 16  # row chunks of float sums (PCA, k-means, dispersion): fixed, so that they don't depend on `n_jobs`
 _GRAM_CHUNKS = 4  # row chunks (p x p slabs) of the Gram matrix from sparse rows
 _GRAM_TILE = 4096  # cells per dense tile of the Gram matrix from dense rows
 _SPARSE_GRAM = 0.1  # share of nonzeros in the highly variable genes below which the Gram matrix uses the sparse rows
@@ -1374,8 +1374,7 @@ class _EM:
         share = np.ascontiguousarray(share / share.sum(axis=2, keepdims=True))
         size = data.size if windows is None else data.Yw @ use.astype(data.Yw.dtype)
         size = np.maximum(size.astype(np.float64), 1e-3)
-        n_chunks = min(numba.get_num_threads(), 16)
-        num, den = np.zeros((n_chunks, len(wb))), np.zeros((n_chunks, len(wb)))
+        num, den = np.zeros((_PCA_CHUNKS, len(wb))), np.zeros((_PCA_CHUNKS, len(wb)))  # sums independent of n_jobs
         assign = np.ascontiguousarray(assign, dtype=np.int64)
         K.nb_moments(data.Yw, size, self.types, assign, share, use, num, den)
         phi = 1.0 / np.clip(num.sum(0) / np.maximum(den.sum(0), 1e-12), 1e-3, 1e2)

@@ -490,3 +490,11 @@ def test_depth_just_below_the_observed_one():
     observed = float(np.median(np.asarray(adata.X.sum(axis=1)).ravel()))
     table = _run(adata, depth=observed * (1 - 1.0005e-5))
     assert (table["null_var_source"] == "measured").all()
+
+
+def test_does_not_depend_on_n_jobs():
+    sim = Sim()
+    adata = sim.adata(sim.counts(400, 50))
+    a, b = (_run(adata, depth=[25, 50, 80], n_jobs=n) for n in (1, 2))
+    pd.testing.assert_frame_equal(a, b, check_exact=True)
+
