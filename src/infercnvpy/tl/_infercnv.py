@@ -15,7 +15,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log, log_result
 from infercnvpy._numba import dask_task, n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column, _params_for_uns
+from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _listed, _obs_column, _params_for_uns
 from infercnvpy.tl._infercnv_kernels import (
     _cnv_csr,
     _cnv_dense,
@@ -186,6 +186,7 @@ def infercnv(
         raise ValueError("`window_size`, `step` and `chunksize` must be at least 1.")
     if adata.n_obs == 0:
         raise ValueError("infercnv needs at least one cell.")
+    reference_cat, exclude_chromosomes = _listed(reference_cat), _listed(exclude_chromosomes)
 
     params = _params_for_uns(
         # an explicit `reference` overrides `reference_key` and `reference_cat`

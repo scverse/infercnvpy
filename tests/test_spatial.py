@@ -282,3 +282,11 @@ def test_spatial_cnv_saves_once(adata_spatial, tmp_path):
     for p in tmp_path.iterdir():
         assert (plt.imread(p)[..., :3] < 0.9).any(), p.name
     assert plt.get_fignums() == [fig.number]
+
+
+def test_spatial_cnv_keeps_an_inverted_y_axis(adata_spatial):
+    """Drawn into axes whose y axis already points down (an image drawn first), the axis stays that way."""
+    ax = plt.figure().add_subplot()
+    ax.invert_yaxis()
+    cnv.pl.spatial_cnv(adata_spatial, region="chr1", ax=ax, show=False)
+    assert ax.yaxis_inverted()

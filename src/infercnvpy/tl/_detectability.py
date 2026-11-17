@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
+from copy import copy
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -284,7 +285,11 @@ def detectability(
     frames = []
     with numba_threads(n_jobs):
         model.fit(X)
-        base = model.run(X, 1.0) if inplace or any(t >= observed or np.isclose(t, observed) for t in targets) else None
+        base = (
+            model.run(X, 1.0)
+            if inplace or any(t > observed or np.isclose(t / observed, 1.0) for t in targets)
+            else None
+        )
         for target in targets:
             f = target / observed
             if np.isclose(f, 1.0):
@@ -292,7 +297,8 @@ def detectability(
                 fit, null_var, source = base, _measured(base), "measured"
             elif f < 1:
                 rng = np.random.default_rng([random_state, int(round(target * 1000))])
-                fit = model.run(_thin(X, f, rng), 1.0)
+                thinned = _thin(X, f, rng)
+                fit = model.at(thinned).run(thinned, 1.0)
                 null_var, source = _measured(fit), "measured"
             else:
                 assert base is not None
@@ -380,13 +386,29 @@ class _Model:
 
     def fit(self, X: sp.csr_matrix) -> None:
         """Expected shares of each share group and the NB dispersion of each gene, on the observed counts `X`."""
-        n_codes = 2 * self.n_groups
-        sums = _group_sums(X, np.arange(X.shape[0]), self.code, n_codes)
+        sums = self._shares(X)
+        self.phi = self._dispersion(X, ref_counts=sums[1::2].sum(axis=0))
+        self._set_P2()
+
+    def at(self, X: sp.csr_matrix) -> _Model:
+        """A copy with the shares and group counts of the counts `X` (e.g. thinned) and the dispersions of `fit`.
+
+        The leave-one-out expectation of a cell needs the group counts and shares of the counts it is run on.
+        """
+        model = copy(self)
+        model._shares(X)
+        model._set_P2()
+        return model
+
+    def _shares(self, X: sp.csr_matrix) -> np.ndarray:
+        sums = _group_sums(X, np.arange(X.shape[0]), self.code, 2 * self.n_groups)
         self.Ns = sums.sum(axis=1)
         with np.errstate(invalid="ignore", divide="ignore"):
             self.p = np.nan_to_num(sums / self.Ns[:, None])
         self.P = np.asarray(self.p @ self.to_arm)
-        self.phi = self._dispersion(X, ref_counts=sums[1::2].sum(axis=0))
+        return sums
+
+    def _set_P2(self) -> None:
         q = self.p**2 * self.phi
         self.P2 = np.column_stack([np.asarray(q @ self.to_arm), q.sum(axis=1)])
 
@@ -509,7 +531,9 @@ def _min_ratio(I, A, B, v, n: int, za: float, zb: float, *, gain: bool) -> np.nd
     with np.errstate(invalid="ignore", divide="ignore"):
         k, c, q = np.sqrt(n) * I, np.sqrt(v) * za * np.sqrt(I), v * zb**2
         a2, a1, a0 = k**2 - q * B, -(2 * k * c + s * q * (A + 2 * B)), c**2 - q * I
-        disc = np.sqrt(a1**2 - 4 * a2 * a0)
+        disc = np.sqrt(
+            np.maximum(a1**2 - 4 * a2 * a0, 0)
+        )  # power 0.5 gives a square, whose discriminant rounds below 0
         roots = np.stack([(-a1 - disc) / (2 * a2), (-a1 + disc) / (2 * a2)])
         roots = np.where(np.isclose(a2, 0), -a0 / a1, roots)
         roots = np.where((roots >= c / k * (1 - 1e-9)) & (gain | (roots <= 1)) & (I > 0), roots, np.nan)

@@ -889,3 +889,60 @@ def test_copy_number_max_neighbor_weight(cap):
     else:
         assert 0 < info["neighbor_weight"] <= cap
         assert info["converged"]
+
+
+def test_parameters_can_be_written(tmp_path):
+    """A Generator seed is stored as None, so that the AnnData can be written."""
+    adata = _simulate(depth=60)
+    cnv.tl.copy_number(adata, min_genes=5, min_detection=0.01, random_state=np.random.default_rng(0))
+    assert adata.uns["copy_number"]["params"]["random_state"] is None
+    adata.write_h5ad(tmp_path / "a.h5ad")
+
+
+def test_iterators_as_arguments():
+    """An iterator argument is read once, so the exclusion it holds is applied."""
+    adata = _simulate(depth=60)
+    kw = {"min_genes": 5, "min_detection": 0.01, "inplace": False}
+    as_list = cnv.tl.copy_number(adata, exclude_chromosomes=["chr1"], exclude_genes=["g500"], **kw)[2]
+    as_iter = cnv.tl.copy_number(adata, exclude_chromosomes=iter(["chr1"]), exclude_genes=map(str, ["g500"]), **kw)[2]
+    assert as_iter["undetermined"] == as_list["undetermined"]
+    assert as_iter["params"] == as_list["params"]
+    chr_pos = cnv.tl.infercnv(adata, exclude_chromosomes=(c for c in ["chr1"]), window_size=50, inplace=False)[0]
+    assert "chr1" not in chr_pos
+
+
+def test_overlapping_progress_bars_leave_the_handlers():
+    """Progress bars of runs in other threads end in any order; the wrapper applies the filters added to it."""
+    import logging
+
+    from infercnvpy._logging import log
+
+    logger = log.logger
+    while not logger.handlers and logger.propagate and logger.parent is not None:
+        logger = logger.parent
+    before = list(logger.handlers)
+    a, b = M._progress(1, True), M._progress(1, True)
+    a.__enter__()
+    b.__enter__()
+    a.__exit__(None, None, None)
+    b.__exit__(None, None, None)
+    assert logger.handlers == before
+
+    seen = []
+
+    class Record(logging.Handler):
+        def emit(self, record):
+            seen.append(record)
+
+    wrapper = M._ClearBars(Record())
+    wrapper.addFilter(lambda record: False)
+    wrapper.handle(logging.makeLogRecord({"msg": "x", "levelno": logging.WARNING}))
+    assert not seen
+
+
+def test_no_aneuploid_warning_with_reference(caplog):
+    """Without aneuploid cells, the warning for a run with reference cells doesn't ask for reference cells."""
+    adata = _simulate(n_tumour=0, n_normal=300)
+    cnv.tl.copy_number(adata, reference_key="truth", reference_cat="normal", n_restarts=1, n_jobs=2, inplace=False)
+    [msg] = [r.getMessage() for r in caplog.records if "no cell is called aneuploid" in r.getMessage()]
+    assert "comes from the sample itself" not in msg

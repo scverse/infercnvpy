@@ -460,3 +460,33 @@ def test_threads_and_input_formats():
     c.layers["counts"] = c.X.copy()
     c.X = sp.csr_matrix(np.log1p(c.X.toarray()))
     pd.testing.assert_frame_equal(_run(c, layer="counts", **kwargs), expected, rtol=1e-6)
+
+
+def test_power_one_half():
+    """At power 0.5 the quadratic of `_min_ratio` is a square, which still has its root."""
+    table = _run(Sim().adata(Sim().counts(1000, 50)), power=0.5)
+    finite = np.isfinite(table["cells_gain"])
+    assert finite.any()
+    assert table.loc[finite, ["gain_ratio", "loss_ratio", "gain_ratio_ideal", "loss_ratio_ideal"]].notna().all().all()
+
+
+def test_thinning_leaves_the_cell_out_of_its_group():
+    """At a lower depth, a share group of one reference cell gets less information, not more."""
+    sim = Sim()
+    X = sim.counts(501, 50)
+    adata = sim.adata(X, cell_type=["A"] * 500 + ["S"])
+    observed = float(np.median(X.sum(axis=1)))
+    kw = {"groupby": "cell_type", "reference_key": "cell_type", "reference_cat": ["A", "S"]}
+    table = _run(adata, depth=[observed, 0.9 * observed], **kw)
+    s = table.reset_index(drop=True).query("group == 'S'")
+    info = s.pivot_table(index="arm", columns="depth", values="info", observed=True)
+    assert (info.iloc[:, 0] <= info.iloc[:, 1] + 1e-12).all()
+
+
+def test_depth_just_below_the_observed_one():
+    """A depth within rounding of the observed median counts as the observed one."""
+    sim = Sim()
+    adata = sim.adata(sim.counts(300, 50))
+    observed = float(np.median(np.asarray(adata.X.sum(axis=1)).ravel()))
+    table = _run(adata, depth=observed * (1 - 1.0005e-5))
+    assert (table["null_var_source"] == "measured").all()

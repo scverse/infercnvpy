@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, fields
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -12,7 +13,7 @@ from anndata import AnnData
 from matplotlib import patches
 from matplotlib import pyplot as plt
 from matplotlib.artist import Artist
-from matplotlib.colors import BoundaryNorm, Colormap, ListedColormap, Normalize, TwoSlopeNorm
+from matplotlib.colors import BoundaryNorm, Colormap, ListedColormap, Normalize
 from matplotlib.path import Path as MplPath
 from matplotlib.text import Text
 from matplotlib.ticker import FixedFormatter
@@ -22,7 +23,7 @@ from mpl_toolkits.axes_grid1.axes_size import Fixed
 from infercnvpy._logging import SKIP_OWN_FRAMES
 from infercnvpy._numba import n_kernel_chunks, numba_threads
 from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column, _splice_doc
-from infercnvpy.pl._chromosome_heatmap_legacy import legacy_heatmap, legacy_summary
+from infercnvpy.pl._chromosome_heatmap_legacy import legacy_heatmap, legacy_summary, two_slope_norm
 from infercnvpy.pl._heatmap_kernels import binned_sums, column_ranges, gram, pixel_rows, sampled_rows
 
 if TYPE_CHECKING:
@@ -173,8 +174,6 @@ def chromosome_heatmap(
     values = opts.transform(values, var_range)
     if aggregate == "mean":
         lo, hi = np.nanmin(values), np.nanmax(values)
-        center = 0 if opts.vcenter is None else opts.vcenter
-        lo, hi = min(lo, center - 1e-9), max(hi, center + 1e-9)  # TwoSlopeNorm needs vmin < vcenter < vmax
     norm = opts.color_norm(lo, hi)
     axes = _draw(fig, ax, adata, groupby, cat, palette, values, rows, dendro, use_rep, norm, cmap, opts)
     return _finish(fig, axes, show=show, save=save, return_fig=return_fig, own=own)
@@ -291,11 +290,7 @@ class _Options:
         """The user's `norm`, or a `TwoSlopeNorm` at `vcenter` (0) from `vmin` to `vmax` (default `lo` and `hi`)."""
         if self.norm is not None:
             return self.norm
-        return TwoSlopeNorm(
-            0 if self.vcenter is None else self.vcenter,
-            vmin=lo if self.vmin is None else self.vmin,
-            vmax=hi if self.vmax is None else self.vmax,
-        )
+        return two_slope_norm(0 if self.vcenter is None else self.vcenter, lo, hi, self.vmin, self.vmax)
 
 
 #: :func:`scanpy.pl.heatmap` arguments that `mode="fast"` implements; any other one switches to `mode="legacy"`.
@@ -324,7 +319,11 @@ def _use_legacy(func: str, adata: AnnData, groupby: str, use_rep: str, mode: str
     if kwargs.get("standard_scale") not in (None, "var", "obs"):
         reasons.append(f"standard_scale={kwargs['standard_scale']!r}")
     col = _obs_column(adata, groupby)
-    if pd.api.types.is_numeric_dtype(col) and not isinstance(col.dtype, pd.CategoricalDtype):
+    if (
+        pd.api.types.is_numeric_dtype(col)
+        and not pd.api.types.is_bool_dtype(col)
+        and not isinstance(col.dtype, pd.CategoricalDtype)
+    ):
         reasons.append("a numeric `groupby` column")
     if reasons:
         X = adata.obsm[f"X_{use_rep}"]
@@ -597,16 +596,7 @@ def _chromosome_brackets(
             texts.append(ax.text((lo + hi) / 2, 1.1, label, ha="center", va="bottom", rotation=rotation))
         codes += [MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO]
     ax.add_patch(patches.PathPatch(MplPath(verts, codes), facecolor="none", lw=1.5))
-    widths = np.diff([*starts, n_cols])
-
-    def thin(renderer: RendererBase) -> None:
-        pos = np.array([t.get_transform().transform(t.get_position())[1 if right else 0] for t in texts])
-        extent = np.array([_extent(t, t.get_text(), renderer, along_x=not right) for t in texts])
-        for t, show in zip(texts, _keep_labels(pos, extent, widths), strict=True):
-            if t.get_visible() != show:
-                t.set_visible(show)
-
-    ax.add_artist(_BeforeDraw(thin))
+    ax.add_artist(_BeforeDraw(partial(_thin_brackets, texts, np.diff([*starts, n_cols]), right)))
     if right:
         ax.set_xlim(0, 1)
     else:
@@ -614,25 +604,34 @@ def _chromosome_brackets(
     ax.axis("off")
 
 
+def _thin_brackets(texts: list[Text], widths: np.ndarray, right: bool, renderer: RendererBase) -> None:
+    """Hide the chromosome labels that would overlap the label of a wider chromosome."""
+    pos = np.array([t.get_transform().transform(t.get_position())[1 if right else 0] for t in texts])
+    extent = np.array([_extent(t, t.get_text(), renderer, along_x=not right) for t in texts])
+    for t, show in zip(texts, _keep_labels(pos, extent, widths), strict=True):
+        if t.get_visible() != show:
+            t.set_visible(show)
+
+
 def _thin_group_labels(ax: Axes, labels: list[str], centers: np.ndarray, rows: np.ndarray, *, swap: bool) -> None:
     """Leave out the tick labels of groups that would overlap the label of a larger group, at drawing time."""
-    axis = ax.xaxis if swap else ax.yaxis
     formatter = FixedFormatter(labels)
-    axis.set_major_formatter(formatter)
+    (ax.xaxis if swap else ax.yaxis).set_major_formatter(formatter)
+    ax.add_artist(_BeforeDraw(partial(_thin_ticks, ax, formatter, labels, centers, rows, swap)))
 
-    def thin(renderer: RendererBase) -> None:
-        proto = axis.get_major_ticks()[0].label1  # font and rotation of the tick labels
-        pos = ax.transData.transform(np.column_stack([centers, centers]))[:, 0 if swap else 1]
-        extent = np.array([_extent(proto, label, renderer, along_x=swap) for label in labels])
-        formatter.seq = [
-            label if keep else "" for label, keep in zip(labels, _keep_labels(pos, extent, rows), strict=True)
-        ]
 
-    ax.add_artist(_BeforeDraw(thin))
+def _thin_ticks(ax, formatter, labels, centers, rows, swap: bool, renderer: RendererBase) -> None:
+    proto = (ax.xaxis if swap else ax.yaxis).get_major_ticks()[0].label1  # font and rotation of the tick labels
+    pos = ax.transData.transform(np.column_stack([centers, centers]))[:, 0 if swap else 1]
+    extent = np.array([_extent(proto, label, renderer, along_x=swap) for label in labels])
+    formatter.seq = [label if keep else "" for label, keep in zip(labels, _keep_labels(pos, extent, rows), strict=True)]
 
 
 class _BeforeDraw(Artist):
-    """Calls `callback(renderer)` when its axes draws, before the tick labels and texts (it draws first)."""
+    """Calls `callback(renderer)` when its axes draws, before the tick labels and texts (it draws first).
+
+    The callback is a module-level function (bound with `functools.partial`), so that the figure can be pickled.
+    """
 
     def __init__(self, callback: Callable[[RendererBase], None]):
         super().__init__()

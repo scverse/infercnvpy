@@ -31,7 +31,7 @@ from tqdm.auto import tqdm
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_matrix, _params_for_uns
+from infercnvpy._util import _as_matrix, _listed, _params_for_uns
 from infercnvpy.tl import _copy_number_kernels as K
 from infercnvpy.tl._infercnv import _categories, _natural_sort, _Rows
 from infercnvpy.tl._spatial import _graph
@@ -386,10 +386,14 @@ def copy_number(
     )  # fmt: skip
     if not 0 <= max_neighbor_weight < 1:
         raise ValueError(f"`max_neighbor_weight` must be at least 0 and below 1, got {max_neighbor_weight}.")
+    reference_cat, exclude_chromosomes, exclude_genes = map(
+        _listed, (reference_cat, exclude_chromosomes, exclude_genes)
+    )
     is_ref = _reference_cells(adata, reference_key, reference_cat)
     G = None if connectivity_key is None else _graph(adata, connectivity_key)
     if isinstance(normal_markers, Mapping):  # lists, so that the parameters can be written to h5ad/zarr
         normal_markers = {k: _as_list(v) for k, v in normal_markers.items()}
+    normal_markers = _listed(normal_markers)
     params = _params_for_uns(
         layer=layer, reference_key=reference_key, reference_cat=reference_cat,
         exclude_chromosomes=exclude_chromosomes, exclude_genes=exclude_genes, min_genes=min_genes,
@@ -560,11 +564,16 @@ def copy_number(
             "inverts the calls. Give known normal cells as `reference_key` / `reference_cat`.",
             flat_gap, _FLAT_GAP,
         )  # fmt: skip
-    if n_an == 0:
+    if n_an == 0 and is_ref is None:
         log.warning(
             "copy_number: no cell is called aneuploid. The diploid baseline comes from the sample itself, so a sample "
             "without normal cells (tumour only, a cell line) is called diploid; give reference cells "
             "(`reference_key`, `reference_cat`) if that is the case."
+        )
+    elif n_an == 0:
+        log.warning(
+            "copy_number: no cell is called aneuploid. With reference cells, weak clones in shallow data can be "
+            "called diploid; run without a reference as well and compare the two."
         )
     return _outputs(
         adata, cells, key_added, inplace, labels, names[clone], names, cna, uns, gene_values,
@@ -662,19 +671,19 @@ def _progress(n_restarts: int, show: bool) -> Iterator[tqdm]:
         with tqdm(total=n_restarts, disable=True) as bar:
             yield bar
         return
-    chain: list[tuple[logging.Logger, list[logging.Handler]]] = []
+    chain: list[logging.Logger] = []
     node: logging.Logger | None = log.logger
     while node is not None:
-        chain.append((node, node.handlers))
+        chain.append(node)
         node = node.parent if node.propagate else None
     try:
-        for lg, handlers in chain:
-            lg.handlers = [_ClearBars(h) for h in handlers]
+        for lg in chain:
+            lg.handlers = [_ClearBars(h) for h in lg.handlers]
         with tqdm(total=n_restarts, desc="copy_number", unit="restart") as bar:
             yield bar
-    finally:
-        for lg, handlers in chain:
-            lg.handlers = handlers
+    finally:  # unwrap rather than restore, so that runs in other threads that overlap this one don't leave wrappers
+        for lg in chain:
+            lg.handlers = [h.handler if isinstance(h, _ClearBars) else h for h in lg.handlers]
 
 
 class _ClearBars(logging.Handler):
@@ -685,7 +694,7 @@ class _ClearBars(logging.Handler):
         self.handler = handler
 
     def handle(self, record: logging.LogRecord) -> bool:
-        if record.levelno >= self.handler.level:
+        if record.levelno >= self.handler.level and self.filter(record):
             with tqdm.external_write_mode(file=sys.stderr):
                 self.handler.handle(record)
         return True
