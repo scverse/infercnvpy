@@ -214,7 +214,8 @@ def copy_number(
     min_detection
         Minimum fraction of cells in which a gene is detected.
     window_size
-        Genes per window of the per-cell likelihood.
+        Genes per window of the per-cell likelihood. A chromosome with fewer than `2 * window_size` genes is split
+        into two windows.
     n_clusters
         Number of expression clusters. Default: one per 50 cells, between 8 and 40.
     segment_length
@@ -923,7 +924,9 @@ class _Data:
         self.source, self.cells, self.lay = source, cells, lay
         bounds = []
         for g0, g in zip(lay.g0s, lay.gs, strict=True):
-            bounds.extend(g0 + np.arange(max(1, g // window_size)) * window_size)
+            # at least two windows, so that the cross-fitted profile of a short chromosome comes from its own genes
+            step = min(window_size, max(1, g // 2))
+            bounds.extend(g0 + np.arange(max(1, g // step)) * step)
         self.wbounds = np.array([*bounds, lay.n_genes], dtype=np.int64)
         self.gene_win = np.repeat(np.arange(len(bounds)), np.diff(self.wbounds))
         self.win_parity = np.arange(len(bounds)) % 2

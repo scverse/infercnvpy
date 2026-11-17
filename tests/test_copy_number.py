@@ -946,3 +946,15 @@ def test_no_aneuploid_warning_with_reference(caplog):
     cnv.tl.copy_number(adata, reference_key="truth", reference_cat="normal", n_restarts=1, n_jobs=2, inplace=False)
     [msg] = [r.getMessage() for r in caplog.records if "no cell is called aneuploid" in r.getMessage()]
     assert "comes from the sample itself" not in msg
+
+
+def test_short_chromosomes_have_both_window_parities():
+    """Cross-fitting scores each window with the profile fitted on the other parity, so a chromosome with fewer than
+    `2 window_size` genes needs windows of both parities to enter the likelihood."""
+    adata = _simulate(n_tumour=20, n_normal=20, n_chrom=3, genes=15)
+    cells, lay, _, _ = M._filter_cells_genes(adata, _Rows(adata.X, 5000), np.zeros(45, bool), None, 0, 0)
+    data = M._Data(_Rows(adata.X, 5000), cells, lay, 10)
+    parity = data.win_parity[data.gene_win]
+    for g0, g in zip(lay.g0s, lay.gs, strict=True):
+        assert set(parity[g0 : g0 + g]) == {0, 1}
+
