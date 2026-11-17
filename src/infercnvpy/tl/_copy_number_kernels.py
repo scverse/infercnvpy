@@ -126,7 +126,7 @@ def pooled_counts(data, indices, indptr, rws, col_map, labels, out):
 
 
 @njit
-def _spillover(y, a, g, use):
+def _spillover(y, a, g):
     """Spillover fraction of one cell.
 
     The fraction `s` in [0, 1] of a cell's counts `y` that maximises the Poisson likelihood of the window shares
@@ -137,8 +137,8 @@ def _spillover(y, a, g, use):
     lo, hi, s = 0.0, 1.0, 0.0
     for it in range(60):
         f1, f2 = 0.0, 0.0
-        for w in range(len(y)):
-            if use[w] and y[w] > 0:
+        for w in range(y.shape[0]):
+            if y[w] > 0:
                 d = g[w] - a[w]
                 q = a[w] + s * d
                 f1 += y[w] * d / q
@@ -158,31 +158,107 @@ def _spillover(y, a, g, use):
     return s
 
 
+# coefficients of fdlibm's log (e_log.c), which is accurate to 1 ulp
+_LN2_HI, _LN2_LO = 6.93147180369123816490e-01, 1.90821492927058770002e-10
+_LG1, _LG2, _LG3, _LG4 = (
+    6.666666666666735130e-01,
+    3.999999999940941908e-01,
+    2.857142874366239149e-01,
+    2.222219843214978396e-01,
+)
+_LG5, _LG6, _LG7 = 1.818357216161805012e-01, 1.531383769920937332e-01, 1.479819860511658591e-01
+
+
 @njit
-def _cell_loglik(y, size, t, share, log_share, phi, use, g, spill_ok, smax, report, out_row):
+def _log_rows(x, out, expo, mant):
+    """`out = log(x)`, as fdlibm computes it (within 1 ulp of `math.log`).
+
+    The loops have no branches, so the compiler runs them on several values at once (SIMD); `math.log` in a loop
+    doesn't allow that. `expo` (int64) and `mant` (float64) are scratch rows. Values that are not positive normal
+    numbers (0, subnormal, infinite, NaN) go through `math.log`.
+    """
+    n = x.shape[0]
+    xi = x.view(np.int64)
+    mi = mant.view(np.int64)
+    odd = 0
+    for i in range(n):
+        hx = xi[i]
+        mbits = hx & 0x000FFFFFFFFFFFFF
+        up = (mbits + 0x95F6198CC4333) >> 52  # 1 if the mantissa is at least sqrt(2): halve it, raise the exponent
+        expo[i] = ((hx >> 52) & 0x7FF) - 1023 + up
+        mi[i] = mbits | ((1023 - up) << 52)
+        odd |= (hx - 0x0010000000000000) | (0x7FEFFFFFFFFFFFFF - hx)  # negative for 0, subnormal, negative, inf, NaN
+    for i in range(n):
+        f = mant[i] - 1.0
+        k = float(expo[i])
+        s = f / (2.0 + f)
+        z = s * s
+        w = z * z
+        r = z * (_LG1 + w * (_LG3 + w * (_LG5 + w * _LG7))) + w * (_LG2 + w * (_LG4 + w * _LG6))
+        hfsq = 0.5 * f * f
+        out[i] = k * _LN2_HI - ((hfsq - (s * (hfsq + r) + k * _LN2_LO)) - f)
+    if odd < 0:
+        for i in range(n):
+            if not (2.2250738585072014e-308 <= x[i] < np.inf):
+                out[i] = math.log(x[i]) if x[i] >= 0 else np.nan
+
+
+@njit
+def _cell_loglik(y, size, t, share, log_share, phi, g, spill_ok, smax, report, out_row, buf):
     """Log likelihoods of one cell under each clone; returns the cell's spillover fraction (0 if not estimated).
 
-    For a cell of a type with `spill_ok`, the diploid expectation (clone 0) mixes its own shares with the shares of
-    the aneuploid cells, with the cell's spillover fraction capped at `smax`. With `report`, the fraction is estimated
-    for cells of every type (and used only for those with `spill_ok`).
+    `y`, `share`, `log_share`, `phi` and `g` hold the used windows only (see `_used_windows`). For a cell of a type
+    with `spill_ok`, the diploid expectation (clone 0) mixes its own shares with the shares of the aneuploid cells,
+    with the cell's spillover fraction capped at `smax`. With `report`, the fraction is estimated for cells of every
+    type (and used only for those with `spill_ok`).
+
+    Per clone, the arguments of the logarithms are written to a row and their logarithms taken in one pass
+    (`_log_rows`, within 1 ulp of `math.log`); the sum follows the windows in order. `buf` (6 rows) is scratch.
     """
     K, W = share.shape[1], share.shape[2]
-    s_raw = _spillover(y, share[t, 0], g, use) if (spill_ok[t] or report) else 0.0
+    xb, pb, mant, lx, lp = buf[0], buf[1], buf[2], buf[3], buf[4]
+    expo = buf[5].view(np.int64)
+    s_raw = _spillover(y, share[t, 0], g) if (spill_ok[t] or report) else 0.0
     s = min(s_raw, smax) if spill_ok[t] else 0.0
     log_size = math.log(size)
     for k in range(K):
         mixed = k == 0 and s > 0.0
+        st = share[t, k]
+        if mixed:
+            for w in range(W):
+                p = (1.0 - s) * st[w] + s * g[w]
+                pb[w] = p
+                xb[w] = size * p + phi[w]
+            _log_rows(pb, lp, expo, mant)
+        else:
+            for w in range(W):
+                xb[w] = size * st[w] + phi[w]
+        _log_rows(xb, lx, expo, mant)
+        lst = log_share[t, k]
         acc = 0.0
         for w in range(W):
-            if use[w]:
-                p = share[t, k, w]
-                if mixed:
-                    p = (1.0 - s) * p + s * g[w]
-                if y[w] > 0:
-                    acc += y[w] * (log_size + (math.log(p) if mixed else log_share[t, k, w]))
-                acc -= (y[w] + phi[w]) * math.log(size * p + phi[w])
+            if y[w] > 0:
+                acc += y[w] * (log_size + (lp[w] if mixed else lst[w]))
+            acc -= (y[w] + phi[w]) * lx[w]
         out_row[k] = acc
     return s_raw
+
+
+@njit
+def _used_windows(use, share, log_share, phi, g):
+    """The windows marked by `use`, and `share`, `log_share`, `phi` and `g` on those windows only (contiguous).
+
+    The cell loops then read every array in order. `share` and `log_share` are types x clones x windows.
+    """
+    wins = np.flatnonzero(use)
+    T, K = share.shape[0], share.shape[1]
+    sh, ls = np.empty((T, K, len(wins))), np.empty((T, K, len(wins)))
+    for t in range(T):
+        for k in range(K):
+            for j in range(len(wins)):
+                sh[t, k, j] = share[t, k, wins[j]]
+                ls[t, k, j] = log_share[t, k, wins[j]]
+    return wins, sh, ls, phi[wins].copy(), g[wins].copy()
 
 
 @njit_parallel
@@ -196,8 +272,16 @@ def nb_loglik_types(Y, size, types, share, log_share, phi, use, g, spill_ok, sma
     aneuploid cells (see `_cell_loglik`); `spill` receives each cell's spillover fraction.
     """
     n = Y.shape[0]
-    for r in prange(n):
-        spill[r] = _cell_loglik(Y[r], size[r], types[r], share, log_share, phi, use, g, spill_ok, smax, report, out[r])
+    wins, sh, ls, ph, gu = _used_windows(use, share, log_share, phi, g)
+    nu = max(len(wins), 1)
+    n_chunks = min(n, 256)
+    step = (n + n_chunks - 1) // n_chunks
+    for ch in prange(n_chunks):
+        scr, yc = np.empty((6, nu)), np.empty(len(wins))
+        for r in range(ch * step, min(n, (ch + 1) * step)):
+            for j in range(len(wins)):
+                yc[j] = Y[r, wins[j]]
+            spill[r] = _cell_loglik(yc, size[r], types[r], sh, ls, ph, gu, spill_ok, smax, report, out[r], scr)
 
 
 @njit_parallel
@@ -378,9 +462,12 @@ def assign_loglik(
     """
     n_rows = out.shape[0]
     W = share.shape[2]
+    wins, sh, ls, ph, gu = _used_windows(use, share, log_share, phi, g)
+    nu = max(len(wins), 1)
     step = (n_rows + n_chunks - 1) // n_chunks
     for ch in prange(n_chunks):
         buf = np.zeros(W)
+        scr, yc = np.empty((6, nu)), np.empty(len(wins))
         for r in range(ch * step, min(n_rows, (ch + 1) * step)):
             for w in range(W):
                 buf[w] = 0.0
@@ -392,9 +479,9 @@ def assign_loglik(
             for w in range(W):
                 if use[w]:
                     s += buf[w]
-            spill[r] = _cell_loglik(
-                buf, max(s, 1e-3), types[r], share, log_share, phi, use, g, spill_ok, smax, True, out[r]
-            )
+            for j in range(len(wins)):
+                yc[j] = buf[wins[j]]
+            spill[r] = _cell_loglik(yc, max(s, 1e-3), types[r], sh, ls, ph, gu, spill_ok, smax, True, out[r], scr)
 
 
 @njit_parallel

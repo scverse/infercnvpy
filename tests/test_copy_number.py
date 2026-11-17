@@ -216,6 +216,61 @@ def test_copy_number_restarts():
     np.testing.assert_array_equal(single[2]["restarts"]["ari"], [[1.0]])
 
 
+def test_log_rows_within_one_ulp():
+    rng = np.random.default_rng(0)
+    x = np.concatenate([np.exp(rng.uniform(-700, 700, 100_000)), [1.0, 2.0, 0.5, np.sqrt(2), 1e-310, 0.0, np.inf]])
+    out = np.empty_like(x)
+    K._log_rows(x, out, np.empty(len(x), dtype=np.int64), np.empty_like(x))
+    with np.errstate(divide="ignore"):
+        ref = np.log(x)
+    finite = np.isfinite(ref) & (ref != 0)
+    assert (np.abs(out - ref)[finite] <= np.spacing(np.abs(ref[finite]))).all()
+    np.testing.assert_array_equal(out[~finite], ref[~finite])
+
+
+def _loglik_f7e288e(Y, size, types, share, log_share, phi, use, g, spill_ok, smax, report):
+    """The per-cell likelihood loop of f7e288e (`math.log` per term), as the reference of the current kernel."""
+    out, spill = np.empty((len(Y), share.shape[1])), np.empty(len(Y))
+    wins = np.flatnonzero(use)
+    for r in range(len(Y)):
+        y, t = Y[r], types[r]
+        s_raw = K._spillover(y[wins], share[t, 0, wins], g[wins]) if (spill_ok[t] or report) else 0.0
+        s = min(s_raw, smax) if spill_ok[t] else 0.0
+        for k in range(share.shape[1]):
+            mixed = k == 0 and s > 0.0
+            acc = 0.0
+            for w in wins:
+                p = (1.0 - s) * share[t, k, w] + s * g[w] if mixed else share[t, k, w]
+                if y[w] > 0:
+                    acc += y[w] * (np.log(size[r]) + (np.log(p) if mixed else log_share[t, k, w]))
+                acc -= (y[w] + phi[w]) * np.log(size[r] * p + phi[w])
+            out[r, k] = acc
+        spill[r] = s_raw
+    return out, spill
+
+
+@pytest.mark.parametrize(("half", "report"), [(False, False), (True, False), (False, True)])
+def test_loglik_kernel_matches_f7e288e(half, report):
+    """The kernel's logarithms (fdlibm, within 1 ulp) leave the log likelihoods within 1e-12 (relative) and the best
+    clone equal."""
+    rng = np.random.default_rng(3)
+    n, W, k, T = 60, 300, 5, 4
+    share = rng.dirichlet(np.ones(W) * 5, (T, k))
+    types = rng.integers(0, T, n)
+    Y = np.stack([rng.poisson(800 * share[t, 0]) for t in types]).astype(np.float32)
+    use = (np.arange(W) % 2 == 0) if half else np.ones(W, dtype=np.bool_)
+    size = (Y.astype(np.float64) * use).sum(axis=1)
+    phi, g = rng.uniform(0.5, 20, W), rng.dirichlet(np.ones(W))
+    spill_ok = np.array([True, False, True, False])
+    args = (Y, size, types, share, np.log(share), phi, use, g, spill_ok, 0.5, report)
+    ll, spill = np.empty((n, k)), np.empty(n)
+    K.nb_loglik_types(*args, ll, spill)
+    ref, ref_spill = _loglik_f7e288e(*args)
+    np.testing.assert_allclose(ll, ref, rtol=1e-12)
+    np.testing.assert_array_equal(ll.argmax(axis=1), ref.argmax(axis=1))
+    np.testing.assert_array_equal(spill, ref_spill)
+
+
 @pytest.mark.parametrize("n", [300, 3000, 1e6])
 def test_spillover_is_the_likelihood_maximum(n):
     """Large `g / a` (a tumour-specific window) made the Newton steps stop near 0."""
@@ -229,8 +284,9 @@ def test_spillover_is_the_likelihood_maximum(n):
     y = rng.multinomial(int(n), 0.7 * a + 0.3 * g).astype(float)
     grid = np.linspace(0, 1, 2001)[:-1]
     best = grid[np.argmax([(y * np.log((1 - s) * a + s * g)).sum() for s in grid])]
-    assert abs(K._spillover(y, a, g, use) - best) <= 1e-3
-    assert K._spillover(1e6 * a, a, g, use) < 1e-3
+    w = np.flatnonzero(use)
+    assert abs(K._spillover(y[w], a[w], g[w]) - best) <= 1e-3
+    assert K._spillover(1e6 * a[w], a[w], g[w]) < 1e-3
 
 
 @pytest.mark.parametrize(
