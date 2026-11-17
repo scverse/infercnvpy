@@ -15,7 +15,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log, log_result
 from infercnvpy._numba import dask_task, n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _listed, _obs_column, _params_for_uns
+from infercnvpy._util import _as_list, _as_matrix, _is_backed, _is_dask, _listed, _obs_column, _params_for_uns
 from infercnvpy.tl._infercnv_kernels import (
     _cnv_csr,
     _cnv_dense,
@@ -174,12 +174,7 @@ def infercnv(
         Only if `calculate_gene_values=True`: CNV values per gene (float32), `NaN` for
         genes that are in no window. With `lazy`, a :class:`dask.array.Array`.
     """
-    if not adata.var_names.is_unique:
-        raise ValueError("Ensure your var_names are unique!")
-    if {"chromosome", "start", "end"} - set(adata.var.columns) != set():
-        raise ValueError(
-            "Genomic positions not found. There need to be `chromosome`, `start`, and `end` columns in `adata.var`. "
-        )
+    _check_var(adata)
     if noise_reference not in ("reference", "all"):
         raise ValueError(f'`noise_reference` must be "reference" or "all", got {noise_reference!r}.')
     if window_size < 1 or step < 1 or chunksize < 1:
@@ -212,11 +207,7 @@ def infercnv(
     if exclude_chromosomes is not None:
         var_mask = var_mask | var["chromosome"].isin(exclude_chromosomes)
     if not _on_used_chromosomes(var, var_mask.to_numpy()).any():
-        raise ValueError(
-            'None of the chromosome names in `adata.var["chromosome"]` start with "chr" (chrM is not used). '
-            'infercnvpy only uses chromosomes named like "chr1". Add the prefix, e.g. with '
-            '`adata.var["chromosome"] = "chr" + adata.var["chromosome"].astype(str)`.'
-        )
+        raise ValueError(NO_CHR_NAMES)
     expr = _as_matrix(adata.X if layer is None else adata.layers[layer], lazy=True)
     if lazy and not _is_dask(expr):
         raise ValueError("`lazy=True` needs the expression matrix as a dask array.")
@@ -249,7 +240,7 @@ def infercnv(
             and reference_key is not None
             and reference_cat is not None
         ):
-            band_rows = np.flatnonzero(_obs_column(adata, reference_key).isin(_categories(reference_cat)))
+            band_rows = np.flatnonzero(_obs_column(adata, reference_key).isin(_as_list(reference_cat)))
         res, per_gene_mtx, band = (_run_lazy if lazy else _run)(plan, source, band_rows, calculate_gene_values)
 
     if dynamic_threshold is not None:
@@ -305,14 +296,26 @@ def _natural_sort(l: Sequence):
     return sorted(l, key=alphanum_key)
 
 
+NO_CHR_NAMES = (
+    'None of the chromosome names in `adata.var["chromosome"]` start with "chr" (chrM is not used). infercnvpy only '
+    'uses chromosomes named like "chr1". Add the prefix, e.g. with '
+    '`adata.var["chromosome"] = "chr" + adata.var["chromosome"].astype(str)`.'
+)
+
+
+def _check_var(adata) -> None:
+    if not adata.var_names.is_unique:
+        raise ValueError("Ensure your var_names are unique!")
+    if {"chromosome", "start", "end"} - set(adata.var.columns):
+        raise ValueError(
+            "Genomic positions not found. There need to be `chromosome`, `start`, and `end` columns in `adata.var`."
+        )
+
+
 def _on_used_chromosomes(var: pd.DataFrame, mask: np.ndarray) -> np.ndarray:
     """Genes not in `mask` on a chromosome infercnvpy uses (named like "chr1", not "chrM")."""
     chromosome = var["chromosome"].astype(str)
     return ~mask & chromosome.str.startswith("chr").to_numpy() & (chromosome != "chrM").to_numpy()
-
-
-def _categories(reference_cat: str | Sequence[str]) -> np.ndarray:
-    return np.array([reference_cat] if isinstance(reference_cat, str) else reference_cat)
 
 
 class _Layout:
@@ -750,7 +753,7 @@ def _get_reference(
             )
         else:
             labels = _obs_column(adata, reference_key)
-            cats = _categories(reference_cat)
+            cats = np.array(_as_list(reference_cat))
             cats_in_obs = pd.Index(cats).isin(labels.unique())
             if not np.all(cats_in_obs):
                 raise ValueError(

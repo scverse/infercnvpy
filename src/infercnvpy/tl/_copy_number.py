@@ -31,9 +31,10 @@ from tqdm.auto import tqdm
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_matrix, _listed, _params_for_uns
+from infercnvpy._util import _as_list, _as_matrix, _listed, _params_for_uns
 from infercnvpy.tl import _copy_number_kernels as K
-from infercnvpy.tl._infercnv import _categories, _natural_sort, _Rows
+from infercnvpy.tl._infercnv import NO_CHR_NAMES, _check_var, _natural_sort, _on_used_chromosomes, _Rows
+from infercnvpy.tl._infercnv_kernels import _group_sums_csr
 from infercnvpy.tl._spatial import _graph
 
 #: Cell-cycle genes of Tirosh et al. 2016 (S and G2/M phase), with the current symbols of renamed genes added.
@@ -101,7 +102,6 @@ _MAX_SPILL = 0.5  # largest spillover fraction of tumour transcripts in a normal
 _MIN_SEED = 3  # cells of the smallest group that can be the first diploid group (a rare normal population)
 _MIN_RESEED = 10  # cells of the smallest clone that can become the diploid clone later
 _MIN_SEG_GENES = 20  # genes of the shortest run that counts towards the burden; fewer on small panels
-_DOSAGE = "final"  # "final": dosage weights of each fit enter its final likelihood; "drop": no dosage weights
 _MIN_EFFECT = 0.1  # smallest posterior mean log ratio that counts as a copy number change
 _MIN_PANEL_GENES = 1000  # genes passing the filters below which the calls are undetermined (small panels)
 _MIN_MEDIAN_COUNTS = 150  # median counts per cell in those genes below which the calls are undetermined
@@ -349,8 +349,6 @@ def copy_number(
     `adata.uns["copy_number"]["genes"]` : :class:`pandas.DataFrame`
         The genes used, in genomic order, with their `dosage` weight (1: expression follows copy number fully; the
         final likelihood uses these weights).
-    `adata.uns["copy_number"]["baseline"]` : :class:`str`
-        How the first diploid cells were found.
     `adata.uns["copy_number"]["seed"]` : :class:`dict`
         The baseline `method`, the `flatness_gap` between the flat and the other groups and the gap that counts as a
         clear split (`clear_gap`). Without a clear split and without marker-rich groups (`method` "flattest group"),
@@ -368,18 +366,8 @@ def copy_number(
 
     When the cells are `"undetermined"`, `uns` holds `chr_pos`, `bins`, `window_start`, `window_end`, `params` and
     `undetermined` (the number of genes passing the filters and the median counts per cell in them).
-
-    Notes
-    -----
-    The default `max_neighbor_weight=0.8` is a compromise. Lower values call fewer normal cells next to a tumour
-    aneuploid, and higher values find more cells at the edge of a clone in shallow data.
     """
-    if not adata.var_names.is_unique:
-        raise ValueError("Ensure your var_names are unique!")
-    if {"chromosome", "start", "end"} - set(adata.var.columns):
-        raise ValueError(
-            "Genomic positions not found. There need to be `chromosome`, `start`, and `end` columns in `adata.var`."
-        )
+    _check_var(adata)
     _check_args(
         window_size=window_size, min_genes=min_genes, n_iter=n_iter, bin_size=bin_size,
         chunksize=chunksize, n_clusters=n_clusters, max_fit_cells=max_fit_cells, min_detection=min_detection,
@@ -533,11 +521,9 @@ def copy_number(
         "clone_profiles": pd.DataFrame(prof, index=names, columns=bins.index),
         "segments": segments,
         "genes": pd.DataFrame(
-            {"chromosome": lay.chrom, "start": lay.start, "end": lay.end}
-            | ({"dosage": em.dosage} if _DOSAGE == "final" else {}),
+            {"chromosome": lay.chrom, "start": lay.start, "end": lay.end, "dosage": em.dosage},
             index=np.asarray(adata.var_names)[lay.order],
         ),
-        "baseline": baseline_method,
         "seed": {"method": baseline_method, "flatness_gap": float(flat_gap), "clear_gap": _FLAT_GAP},
         "temperature": em.tau,
         "params": params,
@@ -618,7 +604,7 @@ def _fit_clones(data, hmm, pcs, ref_fit, ref_share, n_clusters, rng, min_burden,
         em.normal_type = em.ref_type = ref_type
         em.pinned = ref_fit
     elif mlay is not None:
-        em.normal_type = _marker_types(Yc, marker / total, lay)
+        em.normal_type = _marker_rich(marker / total, np.array([_flatness(y, lay) for y in Yc]))
         log.debug("copy_number: marker-rich expression types %s", np.flatnonzero(em.normal_type))
     frac = np.bincount(gcell, weights=normal, minlength=n_groups) / np.bincount(gcell, minlength=n_groups)
     lut = np.where(frac > 0.5, 0, 1 + np.arange(n_groups))
@@ -636,7 +622,7 @@ def _fit_clones(data, hmm, pcs, ref_fit, ref_share, n_clusters, rng, min_burden,
         k = int(assign.max()) + 1
         target = np.arange(k)
         if not fixed and not reseeded:
-            Yk = data.pooled(assign, k)[0]
+            Yk = em.Y
             sizes = np.bincount(assign, minlength=k)
             flat = np.array([_flatness(y, lay) for y in Yk])
             small = sizes < min(_MIN_RESEED, int(sizes.max()))
@@ -768,10 +754,10 @@ def _reference_cells(adata, reference_key, reference_cat) -> np.ndarray | None:
     if reference_key not in adata.obs.columns:
         raise KeyError(f"`{reference_key}` is not a column of `adata.obs`.")
     values = np.asarray(adata.obs[reference_key])
-    missing = [c for c in _categories(reference_cat) if c not in set(values)]
+    missing = [c for c in _as_list(reference_cat) if c not in set(values)]
     if missing:
         raise ValueError(f"No cell has `{reference_key}` in {missing!r}.")
-    return np.isin(values, _categories(reference_cat))
+    return np.isin(values, _as_list(reference_cat))
 
 
 def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
@@ -789,7 +775,6 @@ def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
         return resp, {"neighbor_weight": 0.0, "sweeps": 0, "converged": True}
     n, k = lt.shape
     G = G[cells][:, cells].tocsr()
-    G.setdiag(0)
     if ref is not None:
         rows = np.repeat(np.arange(n), np.diff(G.indptr))
         G.data = G.data * (ref[rows] == ref[G.indices])
@@ -806,12 +791,10 @@ def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
         pr = (1.0 - lam) * base[push]
         pr[:, 0] += lam
         q[push] = lik[push] * pr / (lik[push] * pr).sum(axis=1, keepdims=True)
-    out, change = np.empty_like(q), np.empty(n)
+    out, change, w = np.empty_like(q), np.empty(n), G.data.astype(np.float64)
     converged, sweep = lam == 0.0, 0
     while not converged and sweep < _NP_SWEEPS:
-        K.neighbor_prior_sweep(
-            G.indptr, G.indices, G.data.astype(np.float64), deg, lik, base, lam, fixed, q, out, change
-        )
+        K.neighbor_prior_sweep(G.indptr, G.indices, w, deg, lik, base, lam, fixed, q, out, change)
         q, out = out, q
         sweep += 1
         converged = change.max() < _NP_TOL
@@ -870,15 +853,12 @@ def _filter_cells_genes(adata, source, excluded, exclude_chromosomes, min_genes,
     var = pd.DataFrame({c: np.asarray(adata.var[c]) for c in ("chromosome", "start", "end")}, index=adata.var_names)
     var["end"] = var["end"].fillna(var["start"])
     chrom = var["chromosome"].astype(object)
-    named = chrom.notna() & var["start"].notna() & chrom.astype(str).str.startswith("chr") & (chrom != "chrM")
+    named = _on_used_chromosomes(var, (chrom.isna() | var["start"].isna()).to_numpy())
     if not named.any():
-        raise ValueError(
-            'None of the chromosome names in `adata.var["chromosome"]` start with "chr". '
-            'infercnvpy only uses chromosomes named like "chr1".'
-        )
+        raise ValueError(NO_CHR_NAMES)
     if exclude_chromosomes is not None:
-        named &= ~chrom.isin(_as_list(exclude_chromosomes))
-    candidates = named.to_numpy() & ~excluded
+        named &= ~chrom.isin(_as_list(exclude_chromosomes)).to_numpy()
+    candidates = named & ~excluded
     det = np.zeros((min(numba.get_num_threads(), 16), adata.n_vars), dtype=np.int64)
     ndet = []
     for X, rws in source.rows_of(None):  # all rows: each block's rows are contiguous
@@ -912,11 +892,6 @@ def _marker_counts(data, clusters, Yc, mlay) -> tuple[np.ndarray, np.ndarray]:
     return M.sum(axis=1), total + M[:, outside].sum(axis=1)
 
 
-def _as_list(x) -> list:
-    """A string as a list of one, any other collection as a list."""
-    return [x] if isinstance(x, str) else list(x)
-
-
 class _Data:
     """Access to the counts of the cells passing the filters: windows of genes per cell, pooled gene counts."""
 
@@ -930,15 +905,10 @@ class _Data:
         self.wbounds = np.array([*bounds, lay.n_genes], dtype=np.int64)
         self.gene_win = np.repeat(np.arange(len(bounds)), np.diff(self.wbounds))
         self.win_parity = np.arange(len(bounds)) % 2
-        n_win = len(self.wbounds) - 1
-        Yw = []
+        self.Yw = np.empty((len(cells), len(bounds)), dtype=np.float32)
         for i0, i1, X, rws in _row_blocks(source, cells):
-            out = np.empty((i1 - i0, n_win), dtype=np.float32)
-            K.window_counts(
-                X.data, X.indices, X.indptr, rws, lay.col_map, self.gene_win, out, n_kernel_chunks(len(out))
-            )
-            Yw.append(out)
-        self.Yw = np.concatenate(Yw)
+            out = self.Yw[i0:i1]
+            K.window_counts(X.data, X.indices, X.indptr, rws, lay.col_map, self.gene_win, out, n_kernel_chunks(i1 - i0))
         self.size = self.Yw.sum(axis=1, dtype=np.float64)
 
     def pooled(self, labels: np.ndarray, k: int | None = None, lay=None):
@@ -948,7 +918,7 @@ class _Data:
         labels = np.ascontiguousarray(labels, dtype=np.int64)
         slabs = np.zeros((min(numba.get_num_threads(), 16), k, lay.n_genes))
         for i0, i1, X, rws in _row_blocks(self.source, self.cells):
-            K.pooled_counts(X.data, X.indices, X.indptr, rws, lay.col_map, labels[i0:i1], slabs)
+            _group_sums_csr(X.data, X.indices, X.indptr, rws, labels[i0:i1], False, slabs, lay.col_map)
         return slabs.sum(axis=0), np.bincount(labels, weights=self.size, minlength=k)
 
     def expression_pcs(self) -> np.ndarray:
@@ -1037,7 +1007,6 @@ class _HMM:
         self.means = np.log(np.array(STATE_RATIOS))
         prior = np.full(len(STATE_RATIOS), (1 - _P_NEUTRAL) / (len(STATE_RATIOS) - 1))
         prior[np.argmin(np.abs(self.means))] = _P_NEUTRAL
-        self.means[np.argmin(np.abs(self.means))] = 0.0
         self.log_prior = np.log(prior)
 
     def __call__(self, y: np.ndarray, v: np.ndarray):
@@ -1168,9 +1137,8 @@ def _seed(Yc, marker, total, groups, gcell, lay) -> tuple[np.ndarray, str, float
         seed |= ok & (flat < (lo + hi) / 2)
         method = "flat groups"
     mfrac = np.bincount(groups, weights=marker) / np.bincount(groups, weights=total)
-    # lower quartile, not median: in samples where normal cells are the majority the median group is itself marker-rich
-    low = np.quantile(mfrac[ok], 0.25)
-    marked = ok & (mfrac > np.maximum(_MARKER_FOLD * low, _MARKER_MIN)) & (flat < np.median(flat[ok]))
+    marked = ok.copy()
+    marked[ok] = _marker_rich(mfrac[ok], flat[ok])
     if marked.any():
         seed |= marked
         method += " + markers"
@@ -1179,11 +1147,12 @@ def _seed(Yc, marker, total, groups, gcell, lay) -> tuple[np.ndarray, str, float
     return seed[gcell], method, hi - lo
 
 
-def _marker_types(Yc, mfrac, lay) -> np.ndarray:
-    """Expression types that are marker-rich (same rule as the marker-rich seed groups) and flatter than the median."""
-    flat = np.array([_flatness(y, lay) for y in Yc])
-    low = np.quantile(mfrac, 0.25)
-    return (mfrac > max(_MARKER_FOLD * low, _MARKER_MIN)) & (flat < np.median(flat))
+def _marker_rich(mfrac: np.ndarray, flat: np.ndarray) -> np.ndarray:
+    """Marker share far above the lower quartile and flatter than the median.
+
+    The lower quartile, not the median: in samples where normal cells are the majority, the median is marker-rich.
+    """
+    return (mfrac > max(_MARKER_FOLD * np.quantile(mfrac, 0.25), _MARKER_MIN)) & (flat < np.median(flat))
 
 
 def _two_means(x: np.ndarray, w: np.ndarray) -> tuple[float, float]:
@@ -1332,7 +1301,7 @@ class _EM:
     def profiles(self, assign, k):
         """Gene-level log ratios of the clones against their expectation (with the deviations of their cells' types)."""
         data = self.data
-        Y, _ = data.pooled(assign, k)
+        self.Y = Y = data.pooled(assign, k)[0]  # the last one is that of the returned clones
         Skt = np.zeros((k, self.n_types))
         np.add.at(Skt, (assign, self.types), data.size)
         E = self.b[None, :] * (Skt @ np.exp(self.e))
@@ -1359,7 +1328,8 @@ class _EM:
     def loglik(self, mu, assign, windows=None, report: bool = False):
         """Negative binomial log likelihood of each cell under each clone (cells x clones), on `windows` (mask).
 
-        With `report`, the spillover fraction is estimated for the cells of every type (for the output).
+        With `report`, the spillover fraction is estimated for the cells of every type, and it and the model are kept
+        (`spill`, `model`) for the output and for `_assign_all`.
         """
         data = self.data
         wb = data.wbounds[:-1]
@@ -1386,12 +1356,12 @@ class _EM:
         spill_ok = self.normal_type & bool(tumour.any())
         with np.errstate(divide="ignore"):
             log_share = np.log(share)
-        ll = np.empty((len(assign), len(mu)))
-        self.spill = np.empty(len(assign))
+        ll, spill = np.empty((len(assign), len(mu))), np.empty(len(assign))
         K.nb_loglik_types(
-            data.Yw, size, self.types, share, log_share, phi, use, g, spill_ok, _MAX_SPILL, report, ll, self.spill
+            data.Yw, size, self.types, share, log_share, phi, use, g, spill_ok, _MAX_SPILL, report, ll, spill
         )
-        self.model = (share, log_share, phi, use, g, spill_ok)
+        if report:
+            self.model, self.spill = (share, log_share, phi, use, g, spill_ok), spill
         return ll
 
     def types_of(self, pcs_all, pcs_fit, ref):
@@ -1506,12 +1476,9 @@ class _EM:
         mu = self.fit(lr, v, cross=True)[0]
         mu_whole, pn_whole, st_whole = self.fit(lr, v, cross=False)
         self.priors = self.type_priors(mu_whole)
-        if _DOSAGE == "final":  # dosage weights of this fit, before the final likelihood
-            self.dosage = _dosage_weights(mu_whole, lr, v, pn_whole)
+        self.dosage = _dosage_weights(mu_whole, lr, v, pn_whole)  # of this fit, before the final likelihood
         ll = self.loglik(mu, assign, report=True)
-        model, spill = self.model, self.spill
         self.tau = self.temperature(mu, assign)
-        self.model, self.spill = model, spill
         log.debug("copy_number: likelihood temperature %.4g", self.tau)
         self.final = (mu_whole, pn_whole, st_whole, lr, v)
         resp, llr = self.posterior(ll, self.types)
@@ -1521,19 +1488,19 @@ class _EM:
 def _assign_all(ems, source, cells, pcs_all, pcs_fit, ref):
     """Posteriors, llr, log likelihoods and types of all `cells` under each fitted model, in one pass over the counts.
 
-    Each cell's type comes from `_EM.types_of`; its likelihood under each model comes from one fused pass over its
-    counts (`assign_loglik`), with the temperature and type priors of that fit. Sets each model's `spill`.
+    Each cell's type comes from `_EM.types_of`; its likelihood under each model comes from its window counts, read
+    once per block, with the temperature and type priors of that fit. Sets each model's `spill`.
     """
     types = [em.types_of(pcs_all, pcs_fit, ref) for em in ems]
     ll = [np.empty((len(cells), em.model[0].shape[1])) for em in ems]
     spill = [np.empty(len(cells)) for _ in ems]
-    lay, gene_win = ems[0].data.lay, ems[0].data.gene_win
+    data = ems[0].data
     for i0, i1, X, rws in _row_blocks(source, cells):
+        Yw = np.empty((i1 - i0, data.Yw.shape[1]), dtype=np.float32)
+        K.window_counts(X.data, X.indices, X.indptr, rws, data.lay.col_map, data.gene_win, Yw, n_kernel_chunks(i1 - i0))
+        size = np.maximum(Yw.sum(axis=1, dtype=np.float64), 1e-3)
         for em, t, l, sp_ in zip(ems, types, ll, spill, strict=True):
-            K.assign_loglik(
-                X.data, X.indices, X.indptr, rws, lay.col_map, gene_win, t[i0:i1], *em.model, _MAX_SPILL,
-                l[i0:i1], sp_[i0:i1], n_kernel_chunks(i1 - i0),
-            )  # fmt: skip
+            K.nb_loglik_types(Yw, size, t[i0:i1], *em.model, _MAX_SPILL, True, l[i0:i1], sp_[i0:i1])
     out = []
     for em, t, l, sp_ in zip(ems, types, ll, spill, strict=True):
         em.spill = sp_

@@ -16,8 +16,8 @@ from scipy.stats import norm
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log_result
 from infercnvpy._numba import numba_threads
-from infercnvpy._util import _as_df, _as_matrix, _obs_column, _params_for_uns
-from infercnvpy.tl._copy_number import HG38_LENGTHS, _as_list, _reference_cells
+from infercnvpy._util import _as_df, _as_list, _as_matrix, _obs_column, _params_for_uns
+from infercnvpy.tl._copy_number import HG38_LENGTHS, _reference_cells
 from infercnvpy.tl._detectability_kernels import _arm_information, _nb_moments
 from infercnvpy.tl._infercnv import _group_sums, _kernel_ready, _natural_sort
 
@@ -306,14 +306,10 @@ def detectability(
                 fit = model.run(X, f)
                 null_var, source = _extrapolated(base, fit), "extrapolated"
             frames.append(
-                _table(fit, null_var, model, group, arms, target, source, at_n_cells, gain, loss, alpha, power).assign(
-                    depth_factor=f
-                )
+                _table(fit, null_var, model, group, arms, target, source, at_n_cells, gain, loss, alpha, power)
             )
+            frames[-1].insert(2, "depth_factor", f)
     table = pd.concat(frames, ignore_index=True)
-    columns = list(table.columns)
-    columns.insert(columns.index("depth") + 1, columns.pop(columns.index("depth_factor")))
-    table = table[columns]
     _warn_unmeasured(table)
 
     n_ref = int(is_ref.sum())

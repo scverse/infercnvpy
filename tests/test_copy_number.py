@@ -12,6 +12,7 @@ from infercnvpy._numba import numba_threads
 from infercnvpy.tl import _copy_number as M
 from infercnvpy.tl import _copy_number_kernels as K
 from infercnvpy.tl._infercnv import _Rows
+from infercnvpy.tl._infercnv_kernels import _group_sums_csr
 from tests.conftest import CN_EVENTS, knn_graph
 from tests.conftest import simulate_copy_number as _simulate
 
@@ -77,7 +78,7 @@ def test_count_kernels_match_references():
     np.testing.assert_allclose(out, np.stack([Xk[:, win_of_col == w].sum(1) for w in range(6)], axis=1))
     labels = rng.integers(0, 3, 20)
     slabs = np.zeros((4, 3, 30))
-    K.pooled_counts(X.data, X.indices, X.indptr, np.arange(10, 30), col_map, labels, slabs)
+    _group_sums_csr(X.data, X.indices, X.indptr, np.arange(10, 30), labels, False, slabs, col_map)
     ref = np.zeros((3, 30))
     for lab in range(3):
         ref[lab, col_map[col_map >= 0]] = X[10:30][labels == lab].toarray()[:, col_map >= 0].sum(0)
@@ -378,7 +379,7 @@ def test_copy_number_warns_on_uncertain_baseline(caplog):
     with caplog.at_level("WARNING"):
         uns = cnv.tl.copy_number(_simulate(**kw), n_jobs=2, inplace=False, force_calls=True)[2]
     seed = uns["seed"]
-    assert seed["method"] == uns["baseline"] and seed["clear_gap"] == M._FLAT_GAP
+    assert seed["clear_gap"] == M._FLAT_GAP
     assert ("baseline is uncertain" in caplog.text) == (seed["method"] == "flattest group")
 
 
@@ -448,7 +449,7 @@ def test_copy_number_reference_and_not_inplace():
     assert gv.shape == adata.shape
     tumour_gv = np.nanmean(gv[(adata.obs["truth"] == "tumour").to_numpy()], axis=0)
     assert np.nanmean(tumour_gv[:200]) > 0.3  # chr1 0-200: gain (genes removed by the filters are NaN)
-    assert uns["baseline"] == "reference"
+    assert uns["seed"]["method"] == "reference"
     assert _accuracy(adata, obs) >= 0.98
     assert "copy_number" not in adata.obs
 

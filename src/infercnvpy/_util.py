@@ -58,6 +58,11 @@ def _as_df(df) -> pd.DataFrame:
     raise TypeError(f"infercnvpy needs `obs` and `var` as pandas DataFrames, got {type(df).__name__}.")
 
 
+def _as_list(x) -> list:
+    """A string as a list of one, any other collection as a list."""
+    return [x] if isinstance(x, str) else list(x)
+
+
 def _obs_column(adata, key: str) -> pd.Series:
     """`adata.obs[key]` as a pandas Series (the `obs` of `anndata.experimental.read_lazy` is a lazy `Dataset2D`)."""
     obs = adata.obs
