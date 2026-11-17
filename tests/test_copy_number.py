@@ -229,16 +229,6 @@ def test_copy_number_spatial_info_with_one_clone():
     assert uns["spatial"] == {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}
 
 
-def test_ari():
-    a = np.array([0, 0, 0, 1, 1, 1])
-    assert M._ari(a, a) == 1.0 and M._ari(a, 1 - a) == 1.0  # names don't matter
-    assert M._ari(a, np.zeros(6)) == 0.0 and M._ari(np.zeros(6), np.zeros(6)) == 1.0
-    # sklearn.metrics.adjusted_rand_score([0, 0, 1, 1], [0, 0, 1, 2]) = 0.5714285714285715
-    assert M._ari(np.array([0, 0, 1, 1]), np.array([0, 0, 1, 2])) == pytest.approx(4 / 7)
-    rng = np.random.default_rng(0)
-    assert abs(M._ari(rng.integers(0, 2, 10_000), rng.integers(0, 2, 10_000))) < 0.01  # chance
-
-
 @pytest.mark.parametrize("show", [False, True])
 def test_copy_number_progress_bar(show, capsys):
     """The bar shows on stderr with `show_progress` (unless TQDM_DISABLE is set) and not without it."""
@@ -278,8 +268,7 @@ def test_copy_number_restarts():
     obs, _, uns, _ = cnv.tl.copy_number(adata, n_restarts=3, n_jobs=2, inplace=False)
     info = uns["restarts"]
     agree, chosen = info["agreement"], info["chosen"]
-    for m in (agree, info["ari"]):
-        assert m.shape == (3, 3) and np.allclose(m, m.T) and np.allclose(np.diag(m), 1.0)
+    assert agree.shape == (3, 3) and np.allclose(agree, agree.T) and np.allclose(np.diag(agree), 1.0)
     assert chosen == np.argmax(agree.sum(axis=1))
     an = (obs["copy_number"] == "aneuploid").to_numpy()
     assert an.sum() == info["n_aneuploid"][chosen]
@@ -290,7 +279,7 @@ def test_copy_number_restarts():
     single = cnv.tl.copy_number(adata, n_restarts=1, n_jobs=2, inplace=False)
     assert (single[0]["copy_number"] == "aneuploid").sum() == info["n_aneuploid"][0]
     assert (single[0]["copy_number_stability"] == 1.0).all()
-    np.testing.assert_array_equal(single[2]["restarts"]["ari"], [[1.0]])
+    np.testing.assert_array_equal(single[2]["restarts"]["agreement"], [[1.0]])
 
 
 def test_log_rows_within_one_ulp():
@@ -305,31 +294,24 @@ def test_log_rows_within_one_ulp():
     np.testing.assert_array_equal(out[~finite], ref[~finite])
 
 
-def _loglik_f7e288e(Y, size, types, share, log_share, phi, use, g, spill_ok, smax, report):
-    """The per-cell likelihood loop of f7e288e (`math.log` per term), as the reference of the current kernel."""
+def _loglik_reference(Y, size, types, share, phi, use, g, spill_ok, smax, report):
+    """Log likelihood of each cell under each clone with `_nb_loglik` (numpy), as the reference of the kernel."""
+    w = np.flatnonzero(use)
     out, spill = np.empty((len(Y), share.shape[1])), np.empty(len(Y))
-    wins = np.flatnonzero(use)
-    for r in range(len(Y)):
-        y, t = Y[r], types[r]
-        s_raw = K._spillover(y[wins], share[t, 0, wins], g[wins]) if (spill_ok[t] or report) else 0.0
-        s = min(s_raw, smax) if spill_ok[t] else 0.0
+    for r, t in enumerate(types):
+        y = Y[r, w].astype(np.float64)
+        spill[r] = K._spillover(y, share[t, 0, w], g[w]) if (spill_ok[t] or report) else 0.0
+        s = min(spill[r], smax) if spill_ok[t] else 0.0
         for k in range(share.shape[1]):
-            mixed = k == 0 and s > 0.0
-            acc = 0.0
-            for w in wins:
-                p = (1.0 - s) * share[t, k, w] + s * g[w] if mixed else share[t, k, w]
-                if y[w] > 0:
-                    acc += y[w] * (np.log(size[r]) + (np.log(p) if mixed else log_share[t, k, w]))
-                acc -= (y[w] + phi[w]) * np.log(size[r] * p + phi[w])
-            out[r, k] = acc
-        spill[r] = s_raw
+            p = (1 - s) * share[t, k, w] + s * g[w] if k == 0 and s > 0 else share[t, k, w]
+            out[r, k] = _nb_loglik(y, size[r], p, phi[w])
     return out, spill
 
 
 @pytest.mark.parametrize(("half", "report"), [(False, False), (True, False), (False, True)])
-def test_loglik_kernel_matches_f7e288e(half, report):
-    """The kernel's logarithms (fdlibm, within 1 ulp) leave the log likelihoods within 1e-12 (relative) and the best
-    clone equal."""
+def test_loglik_kernel_matches_numpy(half, report):
+    """The kernel (fdlibm logarithms) gives the numpy log likelihoods within 1e-12 (relative), the same best clone and
+    the same spillover fractions."""
     rng = np.random.default_rng(3)
     n, W, k, T = 60, 300, 5, 4
     share = rng.dirichlet(np.ones(W) * 5, (T, k))
@@ -339,10 +321,9 @@ def test_loglik_kernel_matches_f7e288e(half, report):
     size = (Y.astype(np.float64) * use).sum(axis=1)
     phi, g = rng.uniform(0.5, 20, W), rng.dirichlet(np.ones(W))
     spill_ok = np.array([True, False, True, False])
-    args = (Y, size, types, share, np.log(share), phi, use, g, spill_ok, 0.5, report)
     ll, spill = np.empty((n, k)), np.empty(n)
-    K.nb_loglik_types(*args, ll, spill)
-    ref, ref_spill = _loglik_f7e288e(*args)
+    K.nb_loglik_types(Y, size, types, share, np.log(share), phi, use, g, spill_ok, 0.5, report, ll, spill)
+    ref, ref_spill = _loglik_reference(Y, size, types, share, phi, use, g, spill_ok, 0.5, report)
     np.testing.assert_allclose(ll, ref, rtol=1e-12)
     np.testing.assert_array_equal(ll.argmax(axis=1), ref.argmax(axis=1))
     np.testing.assert_array_equal(spill, ref_spill)
@@ -357,13 +338,11 @@ def test_spillover_is_the_likelihood_maximum(n):
     spec = rng.choice(2000, 5, replace=False)
     a[spec], g[spec] = 1e-6, 0.02
     a, g = a / a.sum(), g / g.sum()
-    use = np.ones(2000, dtype=np.bool_)
     y = rng.multinomial(int(n), 0.7 * a + 0.3 * g).astype(float)
     grid = np.linspace(0, 1, 2001)[:-1]
     best = grid[np.argmax([(y * np.log((1 - s) * a + s * g)).sum() for s in grid])]
-    w = np.flatnonzero(use)
-    assert abs(K._spillover(y[w], a[w], g[w]) - best) <= 1e-3
-    assert K._spillover(1e6 * a[w], a[w], g[w]) < 1e-3
+    assert abs(K._spillover(y, a, g) - best) <= 1e-3
+    assert K._spillover(1e6 * a, a, g) < 1e-3
 
 
 @pytest.mark.parametrize(
@@ -569,8 +548,7 @@ def test_copy_number_reference_shares_types_with_the_clone():
 
     The clone has two arm events and shares its expression with the reference epithelium, so k-means on all cells puts
     both into the same expression types. These mixed types pulled reference cells into clones (here 12% of the
-    reference epithelium and 11% of the clone missed; Atera tutorial window W1: 80% of the normal epithelium in the
-    reference called).
+    reference epithelium and 11% of the clone missed).
     """
     adata, clone, ctype = _reference_types_data(depth=500, clone_in_reference_type=True, few_events=True)
     refs = [f"t{t}" for t in range(1, 7)] + ["normal epithelium"]
@@ -582,8 +560,7 @@ def test_copy_number_reference_shares_types_with_the_clone():
 
 def test_type_priors_keep_reference_types_diploid():
     """A nearly flat clone that matches the profile of every type takes the prior of normal types, but not of
-    reference types: their cells are known to be diploid (Atera epi_normal calibration, 69% of reference cells in such
-    a clone)."""
+    reference types: their cells are known to be diploid."""
     _, lay, _, _ = _layout(_simulate())
     em = object.__new__(M._EM)
     em.data = type("D", (), {"lay": lay})()
@@ -886,11 +863,11 @@ def test_copy_number_max_neighbour_weight(cap):
     adata, *_ = _tissue(0)
     kw = {"min_genes": 5, "n_jobs": 2, "inplace": False, "force_calls": True, "reference_key": "type"}
     kw["reference_cat"] = "immune"
-    plain = cnv.tl.copy_number(adata, **kw)
     spatial = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", max_neighbour_weight=cap, **kw)
     info = spatial[2]["spatial"]
     assert spatial[2]["params"]["max_neighbour_weight"] == cap
     if cap == 0:
+        plain = cnv.tl.copy_number(adata, **kw)
         pd.testing.assert_frame_equal(plain[0], spatial[0], check_exact=True)
         np.testing.assert_array_equal(plain[1], spatial[1])
         assert info == {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}

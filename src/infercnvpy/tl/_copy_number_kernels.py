@@ -158,7 +158,7 @@ def _spillover(y, a, g):
     return s
 
 
-# coefficients of fdlibm's log (e_log.c), which is accurate to 1 ulp
+# coefficients of fdlibm's log (e_log.c)
 _LN2_HI, _LN2_LO = 6.93147180369123816490e-01, 1.90821492927058770002e-10
 _LG1, _LG2, _LG3, _LG4 = (
     6.666666666666735130e-01,
@@ -213,7 +213,7 @@ def _cell_loglik(y, size, t, share, log_share, phi, g, spill_ok, smax, report, o
     type (and used only for those with `spill_ok`).
 
     Per clone, the arguments of the logarithms are written to a row and their logarithms taken in one pass
-    (`_log_rows`, within 1 ulp of `math.log`); the sum follows the windows in order. `buf` (6 rows) is scratch.
+    (`_log_rows`); the sum follows the windows in order. `buf` (6 rows) is scratch.
     """
     K, W = share.shape[1], share.shape[2]
     xb, pb, mant, lx, lp = buf[0], buf[1], buf[2], buf[3], buf[4]
@@ -251,14 +251,13 @@ def _used_windows(use, share, log_share, phi, g):
     The cell loops then read every array in order. `share` and `log_share` are types x clones x windows.
     """
     wins = np.flatnonzero(use)
-    T, K = share.shape[0], share.shape[1]
-    sh, ls = np.empty((T, K, len(wins))), np.empty((T, K, len(wins)))
-    for t in range(T):
-        for k in range(K):
-            for j in range(len(wins)):
-                sh[t, k, j] = share[t, k, wins[j]]
-                ls[t, k, j] = log_share[t, k, wins[j]]
-    return wins, sh, ls, phi[wins].copy(), g[wins].copy()
+    return (
+        wins,
+        np.ascontiguousarray(share[:, :, wins]),
+        np.ascontiguousarray(log_share[:, :, wins]),
+        phi[wins],
+        g[wins],
+    )
 
 
 @njit_parallel
@@ -501,21 +500,22 @@ def mix_rows(resp, prof, rows, cols, out):
 
 
 @njit_parallel
-def neighbour_prior_sweep(indptr, indices, w, lik, base, lam, fixed, q, out):
-    """One synchronous update of the spatial posteriors: `out_i ~ lik_i * ((1 - lam) base_i + lam m_i)`.
+def neighbour_prior_sweep(indptr, indices, w, deg, lik, base, lam, fixed, q, out, change):
+    """One damped synchronous update of the spatial posteriors: `out_i = (q_i + p_i) / 2`.
 
-    `m_i` is the mean of the posteriors `q_j` of i's neighbours in the CSR graph (`indptr`, `indices`, weights `w`,
-    no diagonal), weighted by `w`. Rows with `fixed` keep `q_i`.
+    `p_i ~ lik_i ((1 - lam) base_i + lam m_i)`, where `m_i` is the mean of the posteriors `q_j` of i's neighbours in
+    the CSR graph (`indptr`, `indices`, weights `w`, no diagonal, row sums `deg`), weighted by `w`. The damping keeps
+    the fixed point and stops neighbours from oscillating. Rows with `fixed` keep `q_i`. `change[i]` receives the
+    largest change of row i.
     """
     n, k = q.shape
     for i in prange(n):
         if fixed[i]:
             for c in range(k):
                 out[i, c] = q[i, c]
+            change[i] = 0.0
             continue
-        d = 0.0
-        for e in range(indptr[i], indptr[i + 1]):
-            d += w[e]
+        d = deg[i]
         tot = 0.0
         for c in range(k):
             m = 0.0
@@ -524,8 +524,12 @@ def neighbour_prior_sweep(indptr, indices, w, lik, base, lam, fixed, q, out):
             p = lik[i, c] * ((1.0 - lam) * base[i, c] + lam * m / d)
             out[i, c] = p
             tot += p
+        most = 0.0
         for c in range(k):
-            out[i, c] /= tot
+            new = 0.5 * (q[i, c] + out[i, c] / tot)
+            most = max(most, abs(new - q[i, c]))
+            out[i, c] = new
+        change[i] = most
 
 
 @njit_parallel

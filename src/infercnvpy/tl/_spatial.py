@@ -134,10 +134,10 @@ def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
     return G
 
 
-def _smooth(G: sp.csr_matrix, X, alpha: float | None, n_hops: int, dtype=np.float32) -> np.ndarray:
+def _smooth(G: sp.csr_matrix, X, alpha: float | None, n_hops: int) -> np.ndarray:
     """`n_hops` smoothing steps of `X` (dense or sparse) over the graph `G`, see the module docstring."""
     graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), -1.0 if alpha is None else float(alpha))
-    out = np.empty(X.shape, dtype=dtype)
+    out = np.empty(X.shape, dtype=np.float32)
     if sp.issparse(X):
         X = sp.csr_matrix(X)
         _hop_csr(*graph, X.indptr, X.indices, X.data, out)
