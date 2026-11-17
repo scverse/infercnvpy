@@ -12,6 +12,8 @@ The method is infercnvpy's own; see the docstring of `copy_number` for the steps
 
 from __future__ import annotations
 
+import logging
+import sys
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 
@@ -26,7 +28,6 @@ from scipy.optimize import nnls
 from scipy.sparse.linalg import eigsh
 from scipy.spatial.distance import squareform
 from tqdm.auto import tqdm
-from tqdm.contrib.logging import logging_redirect_tqdm
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
@@ -654,17 +655,40 @@ def _fit_clones(data, hmm, pcs, ref_fit, ref_share, n_clusters, rng, min_burden,
 def _progress(n_restarts: int, show: bool) -> Iterator[tqdm]:
     """A progress bar over the restarts, with the current step as its postfix (off unless `show`).
 
-    While it shows, log messages go through `tqdm.write`, so that they don't land on the bar's line.
+    While it shows, every handler that our log records reach (the shared scverse logger's, plain or rich, and any
+    further up) writes with the bars cleared, so that a message gets a line of its own.
     """
     if not show:
         with tqdm(total=n_restarts, disable=True) as bar:
             yield bar
         return
-    owner = log.logger  # the logger that holds the console handler (the shared scverse logger)
-    while not owner.handlers and owner.propagate and owner.parent is not None:
-        owner = owner.parent
-    with tqdm(total=n_restarts, desc="copy_number", unit="restart") as bar, logging_redirect_tqdm([owner]):
-        yield bar
+    chain: list[tuple[logging.Logger, list[logging.Handler]]] = []
+    node: logging.Logger | None = log.logger
+    while node is not None:
+        chain.append((node, node.handlers))
+        node = node.parent if node.propagate else None
+    try:
+        for lg, handlers in chain:
+            lg.handlers = [_ClearBars(h) for h in handlers]
+        with tqdm(total=n_restarts, desc="copy_number", unit="restart") as bar:
+            yield bar
+    finally:
+        for lg, handlers in chain:
+            lg.handlers = handlers
+
+
+class _ClearBars(logging.Handler):
+    """Passes records to `handler` with the progress bars on the terminal cleared, and redraws them after."""
+
+    def __init__(self, handler: logging.Handler):
+        super().__init__()
+        self.handler = handler
+
+    def handle(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= self.handler.level:
+            with tqdm.external_write_mode(file=sys.stderr):
+                self.handler.handle(record)
+        return True
 
 
 def _outputs(adata, cells, key_added, inplace, labels, clones, clone_names, cna, uns, gene_values, **values):

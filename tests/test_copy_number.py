@@ -241,21 +241,36 @@ def test_copy_number_progress_bar(show, capsys):
     assert _accuracy(_simulate(), obs) >= 0.98
 
 
-def test_progress_bar_after_the_guard_and_apart_from_logs(capsys):
-    """No bar when the guard labels the cells undetermined; log messages during the fits get lines of their own."""
+@pytest.mark.parametrize("handler", ["stream", "other"])
+def test_progress_bar_after_the_guard_and_apart_from_logs(handler, capsys, monkeypatch):
+    """No bar when the guard labels the cells undetermined; log messages during the fits get lines of their own,
+    whatever handler the scverse logger has (a plain stream handler, or another kind such as rich's)."""
+    import logging
     import os
+    import sys
 
     from scverse_misc.logging import config
 
     if os.environ.get("TQDM_DISABLE"):
         pytest.skip("TQDM_DISABLE is set")
+
+    class Other(logging.Handler):  # writes to the current stderr, like rich's handler, but is no StreamHandler
+        def emit(self, record):
+            sys.stderr.write(self.format(record) + "\n")
+
     cnv.tl.copy_number(_simulate(depth=60), min_genes=5, min_detection=0.01, n_jobs=2, inplace=False)
     assert "restart" not in capsys.readouterr().err
     old = config.verbosity
-    config.verbosity = "debug"
+    config.verbosity = "debug"  # (re)installs the scverse handler, so ours goes in after
+    owner = logging.getLogger("scverse")
+    h = logging.StreamHandler(sys.stderr) if handler == "stream" else Other()
+    h.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    monkeypatch.setattr(owner, "handlers", [h])
     try:
         cnv.tl.copy_number(_simulate(), n_restarts=2, n_jobs=2, inplace=False)
+        assert owner.handlers == [h]  # restored after the fit
     finally:
+        monkeypatch.undo()
         config.verbosity = old
     lines = [x for line in capsys.readouterr().err.splitlines() for x in line.split("\r")]
     logged = [x for x in lines if "copy_number: restart 0, " in x]
