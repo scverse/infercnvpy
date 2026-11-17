@@ -338,17 +338,18 @@ def _row_scale(data, indices, indptr, row, col_map):
 
 
 @njit_parallel
-def log_moments(data, indices, indptr, rws, col_map, s0, s1, s2):
+def log_moments(data, indices, indptr, rws, col_map, row0, n_total, s0, s1, s2):
     """Per gene, the cells that detect it (`s0`) and the sums of `v` (`s1`) and `v^2` (`s2`) over cells.
 
-    `v = log1p(1e4 x count / size)` as in `project_rows`; zeros add nothing. One slab per chunk of rows (chunks x
-    genes); the number of chunks is fixed by the caller, so that the sums don't depend on the number of threads.
+    `v = log1p(1e4 x count / size)` as in `project_rows`; zeros add nothing. The rows `rws` of this block are the
+    cells `row0` onwards of `n_total`. Each slab (chunks x genes) sums a fixed range of all cells, so the sums depend
+    neither on the number of threads nor on the blocks.
     """
     n_chunks = s1.shape[0]
     n_rows = rws.shape[0]
-    step = (n_rows + n_chunks - 1) // n_chunks
+    step = (n_total + n_chunks - 1) // n_chunks
     for ch in prange(n_chunks):
-        for r in range(ch * step, min(n_rows, (ch + 1) * step)):
+        for r in range(max(0, ch * step - row0), min(n_rows, (ch + 1) * step - row0)):
             f = _row_scale(data, indices, indptr, rws[r], col_map)
             for k in range(indptr[rws[r]], indptr[rws[r] + 1]):
                 g = col_map[indices[k]]
@@ -360,19 +361,20 @@ def log_moments(data, indices, indptr, rws, col_map, s0, s1, s2):
 
 
 @njit_parallel
-def gram_sparse(data, indices, indptr, rws, col_map, hvg_of_gene, out):
+def gram_sparse(data, indices, indptr, rws, col_map, hvg_of_gene, row0, n_total, out):
     """Add `x x^T` of each cell's highly variable genes to the upper triangle of `out[chunk]` (chunks x p x p).
 
     `x` holds `log1p(1e4 x count / size)` as in `project_rows`. The work per cell is its number of nonzero highly
-    variable genes squared, so this suits sparse rows; one slab per chunk of rows, summed by the caller.
+    variable genes squared, so this suits sparse rows. As in `log_moments`, each slab sums a fixed range of the
+    `n_total` cells (this block starts at cell `row0`); the caller sums the slabs.
     """
     n_chunks = out.shape[0]
     n_rows = rws.shape[0]
-    step = (n_rows + n_chunks - 1) // n_chunks
+    step = (n_total + n_chunks - 1) // n_chunks
     for ch in prange(n_chunks):
         hs = np.empty(out.shape[1], dtype=np.int64)
         vs = np.empty(out.shape[1])
-        for r in range(ch * step, min(n_rows, (ch + 1) * step)):
+        for r in range(max(0, ch * step - row0), min(n_rows, (ch + 1) * step - row0)):
             f = _row_scale(data, indices, indptr, rws[r], col_map)
             m = 0
             for k in range(indptr[rws[r]], indptr[rws[r] + 1]):

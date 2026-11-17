@@ -152,21 +152,28 @@ def test_kmeans_finds_separated_clusters_without_empty_ones():
     found = M._kmeans(X, 6, np.random.default_rng(1))
     assert len(np.unique(found)) == 6
     assert len(np.unique(truth * 6 + found)) == 6  # the same partition
-    # three distinct points, repeated: random starts often pick one point twice, and that cluster empties and restarts
-    X = np.repeat(np.eye(3), 50, axis=0)
-    for seed in range(5):
+    # three distinct points, repeated: in every start of these seeds one point is picked twice, so a cluster empties
+    # and must restart at the point without a centre
+    X, truth = np.repeat(np.eye(3), 50, axis=0), np.repeat(np.arange(3), 50)
+    for seed in (0, 1, 3, 4):
+        rng = np.random.default_rng(seed)
+        assert all(len(np.unique(truth[rng.choice(150, 3, replace=False)])) < 3 for _ in range(2))
         found = M._kmeans(X, 3, np.random.default_rng(seed), n_starts=2)
-        assert len(np.unique(np.repeat(np.arange(3), 50) * 3 + found)) == 3
+        assert len(np.unique(found)) == 3 and len(np.unique(truth * 3 + found)) == 3
 
 
-def test_kmeans_does_not_depend_on_threads():
+def test_kmeans_sums_do_not_depend_on_threads():
+    """The centroid sums of the k-means pass are bit for bit the same with 1 and 2 threads (fixed chunks)."""
     rng = np.random.default_rng(0)
-    X = rng.normal(size=(20_000, 8))
-    with numba_threads(1):
-        one = M._kmeans(X, 10, np.random.default_rng(3))
-    with numba_threads(2):
-        two = M._kmeans(X, 10, np.random.default_rng(3))
-    np.testing.assert_array_equal(one, two)
+    X, C = rng.normal(size=(20_000, 8)), rng.normal(size=(20, 8))  # two starts of 10 centres
+    out = []
+    for threads in (1, 2):
+        sums, counts = np.zeros((M._PCA_CHUNKS, 20, 8)), np.zeros((M._PCA_CHUNKS, 20))
+        with numba_threads(threads):
+            K.kmeans_assign(X @ C.T, X, (C**2).sum(1), 10, np.empty((20_000, 2), np.int64), np.empty((20_000, 2)), sums,
+                            counts)  # fmt: skip
+        out.append(sums.sum(axis=0))
+    np.testing.assert_array_equal(*out)
 
 
 @pytest.mark.parametrize("size", [None, 4, 7, 25, 1000])
@@ -183,6 +190,43 @@ def test_block_medians_match_array_split(size):
     ]
     np.testing.assert_array_equal(vals, [v for v, _ in ref])
     np.testing.assert_array_equal(ch, [c for _, c in ref])
+
+
+def test_kmeans_split_shares_types_by_all_cells():
+    """With a sample that holds every reference cell, the reference types follow the reference share of all cells."""
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(400, 3))
+    ref = np.arange(400) < 200  # half of the sample, but a tenth of all cells
+    types, ref_type = M._kmeans_split(X, 10, np.random.default_rng(0), ref, 0.1)
+    assert ref_type.sum() == 1 and (ref_type[types[ref]]).all() and not ref_type[types[~ref]].any()
+
+
+def test_expression_pcs_do_not_depend_on_blocks(monkeypatch):
+    """The PCA sums are the same, bit for bit, whatever the blocks of rows (sparse and dense Gram routes)."""
+    adata = _simulate(n_tumour=150, n_normal=150, depth=800)
+    cells, lay, *_ = _layout(adata)
+    monkeypatch.setattr(M, "_GRAM_TILE", 64)
+    for sparse in (0.0, 1.0):
+        monkeypatch.setattr(M, "_SPARSE_GRAM", sparse)
+        out = [M._Data(_Rows(adata.X, size), cells, lay, 10).expression_pcs() for size in (37, 5000)]
+        np.testing.assert_array_equal(*out)
+
+
+def test_copy_number_generator_seed():
+    """A Generator works as `random_state` and gives the results of its integer seed."""
+    adata = _simulate()
+    a = cnv.tl.copy_number(adata, n_jobs=2, inplace=False, random_state=7, n_restarts=2)[0]
+    b = cnv.tl.copy_number(adata, n_jobs=2, inplace=False, random_state=np.random.default_rng(7), n_restarts=2)[0]
+    pd.testing.assert_frame_equal(a, b)
+
+
+def test_copy_number_spatial_info_with_one_clone():
+    """With a graph, `uns["spatial"]` is there even when the kept fit has only the diploid clone."""
+    adata = _simulate(n_tumour=0, n_normal=300)
+    adata.obsp["g"] = knn_graph(np.random.default_rng(0).random((adata.n_obs, 2)), 6)
+    obs, _, uns, _ = cnv.tl.copy_number(adata, n_jobs=2, inplace=False, connectivity_key="g", force_calls=True)
+    assert len(uns["clones"]) == 1
+    assert uns["spatial"] == {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}
 
 
 def test_ari():
@@ -205,6 +249,27 @@ def test_copy_number_progress_bar(show, capsys):
     obs = cnv.tl.copy_number(_simulate(), n_restarts=2, n_jobs=2, inplace=False, show_progress=show)[0]
     assert ("copy_number restart 2/2" in capsys.readouterr().err) == show
     assert _accuracy(_simulate(), obs) >= 0.98
+
+
+def test_progress_bar_after_the_guard_and_apart_from_logs(capsys):
+    """No bar when the guard labels the cells undetermined; log messages during the fits get lines of their own."""
+    import os
+
+    from scverse_misc.logging import config
+
+    if os.environ.get("TQDM_DISABLE"):
+        pytest.skip("TQDM_DISABLE is set")
+    cnv.tl.copy_number(_simulate(depth=60), min_genes=5, min_detection=0.01, n_jobs=2, inplace=False)
+    assert "restart" not in capsys.readouterr().err
+    old = config.verbosity
+    config.verbosity = "debug"
+    try:
+        cnv.tl.copy_number(_simulate(), n_restarts=2, n_jobs=2, inplace=False)
+    finally:
+        config.verbosity = old
+    lines = [x for line in capsys.readouterr().err.splitlines() for x in line.split("\r")]
+    logged = [x for x in lines if "copy_number: restart 0, " in x]
+    assert logged and not any("%|" in x for x in logged)
 
 
 def test_copy_number_restarts():
@@ -329,7 +394,7 @@ def test_copy_number_synthetic(kw):
 
 
 _DETECTION_BIAS = pytest.mark.xfail(
-    strict=False,  # the first case depends on the seed: some restarts invert the baseline, and the majority wins
+    strict=True,
     reason="open: where a tumour is the majority at low depth, its losses fall below the detection filter more often "
     "than its gains and the tumour looks flattest. Scoring genes detected per expression cluster fixed this but "
     "inverted real panel cuts and droplet lines (cluster-specific genes enter the flatness), so it was not kept.",
@@ -340,7 +405,9 @@ _DETECTION_BIAS = pytest.mark.xfail(
     "kw",
     [
         pytest.param(
-            {"n_tumour": 600, "n_normal": 200, "depth": 400, "normal_depth": 1.0, "seed": 4}, marks=_DETECTION_BIAS
+            {"n_tumour": 600, "n_normal": 200, "depth": 400, "normal_depth": 1.0, "seed": 4},
+            # the same bias, but this case depends on the seed: some restarts invert the baseline, the majority wins
+            marks=pytest.mark.xfail(strict=False, reason="detection bias (see the next case), seed-dependent"),
         ),
         pytest.param({"n_tumour": 600, "n_normal": 600, "depth": 400, "seed": 2}, marks=_DETECTION_BIAS),
         {"n_tumour": 600, "n_normal": 9},  # a rare normal population was too small to seed the baseline
@@ -369,23 +436,29 @@ def test_copy_number_warns_on_uncertain_baseline(kw, caplog):
     assert ("baseline is uncertain" in caplog.text) == (seed["method"] == "flattest group")
 
 
-def test_marker_counts_keep_undetected_markers():
+@pytest.mark.parametrize("shuffled", [False, True])
+def test_marker_counts_keep_undetected_markers(shuffled):
     """The marker fraction counts every marker, also one that the detection filter removed (a rare normal
-    population keeps its markers); without such markers it is the share of the markers among the model's genes."""
+    population keeps its markers); without such markers it is the share of the markers among the model's genes.
+    With the genes of `var` not in genomic order, the markers outside the model's genes are still the right ones."""
     adata = _simulate(n_tumour=385, n_normal=15)
     normal = (adata.obs["truth"] == "normal").to_numpy()
     X = adata.X.tolil()
     X[:, 0] = normal[:, None].astype(np.float32) * 5  # a marker of the 15 normal cells: under 5% of all cells
     adata.X = X.tocsr()
+    names = adata.var_names[[0, 5, 900, 1700]]  # g0 (filtered out) and three markers that pass
+    if shuffled:
+        adata = adata[:, np.random.default_rng(0).permutation(adata.n_vars)].copy()
     cells, lay, var, candidates = _layout(adata)
     data = M._Data(_Rows(adata.X, 5000), cells, lay, 10)
     clusters = normal[cells].astype(np.int64)
     Yc = data.pooled(clusters)[0]
+    idx = adata.var_names.get_indexer(names)
     is_marker = np.zeros(adata.n_vars, dtype=bool)
-    is_marker[[0, 5]] = True
-    assert lay.col_map[0] < 0 and lay.col_map[5] >= 0
-    marker, total = M._marker_counts(data, clusters, Yc, var, candidates, is_marker)
-    np.testing.assert_allclose(marker, Yc[:, lay.col_map[5]] + [0, 75])
+    is_marker[idx] = True
+    assert lay.col_map[idx[0]] < 0 and (lay.col_map[idx[1:]] >= 0).all()
+    marker, total = M._marker_counts(data, clusters, Yc, M._Layout(var, is_marker & candidates))
+    np.testing.assert_allclose(marker, Yc[:, lay.col_map[idx[1:]]].sum(axis=1) + [0, 75])
     np.testing.assert_allclose(total, Yc.sum(axis=1) + [0, 75])
 
 
@@ -719,14 +792,15 @@ def test_copy_number_neighbour_prior_tissue(seed):
     assert info["converged"] and 0 < info["neighbour_weight"] <= 0.8
 
 
-def test_copy_number_neighbour_prior_without_reference():
+@pytest.mark.parametrize("seed", [0, 1])
+def test_copy_number_neighbour_prior_without_reference(seed):
     """Without a reference the neighbour prior uses the whole graph and still improves the calls."""
-    adata, tumour, *_ = _tissue(1)
+    adata, tumour, *_ = _tissue(seed)
     kw = {"min_genes": 5, "n_jobs": 2, "inplace": False, "force_calls": True}
     plain = cnv.tl.copy_number(adata, **kw)[0]
     spatial = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", **kw)[0]
     acc = [((o["copy_number"] == "aneuploid").to_numpy() == tumour).mean() for o in (plain, spatial)]
-    assert acc[1] >= acc[0] + 0.02
+    assert acc[1] >= 0.95 and acc[1] >= acc[0] + 0.02
 
 
 def test_copy_number_without_graph_edges_is_unchanged():
@@ -778,6 +852,15 @@ def test_neighbour_prior_fixed_point_and_weight():
     ref = rng.random(n) < 0.3
     resp, _, q, _ = run(coherent, ref)
     assert (q[ref, 1:].sum(axis=1) <= resp[ref, 1:].sum(axis=1) + 1e-12).all()
+    # a reference cell whose neighbours are all non-reference has no edges left: it keeps its per-cell posterior
+    G = G.tolil()
+    for i in np.flatnonzero(ref)[:20]:
+        G[i, :], G[:, i] = 0, 0
+        G[i, np.flatnonzero(~ref)[:5]] = G[np.flatnonzero(~ref)[:5], i] = 1
+    G = G.tocsr()
+    resp, _, q, info = run(coherent, ref)
+    assert info["neighbour_weight"] > 0
+    np.testing.assert_array_equal(q[np.flatnonzero(ref)[:20]], resp[np.flatnonzero(ref)[:20]])
 
 
 @pytest.mark.parametrize("cap", [0.0, 0.3, 0.6])
