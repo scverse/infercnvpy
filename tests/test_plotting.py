@@ -520,9 +520,10 @@ def test_bool_groupby_draws_fast(adata_small):
 
 
 def test_column_ranges_with_an_empty_block():
-    from infercnvpy.pl._heatmap_kernels import column_ranges
+    from infercnvpy.pl._heatmap_kernels import ColumnRanges
 
     X = np.random.default_rng(0).normal(size=(20, 5))
-    lo, hi = column_ranges(da.from_array(X, chunks=((10, 0, 10), (5,))))
-    np.testing.assert_array_equal(lo, X.min(axis=0))
-    np.testing.assert_array_equal(hi, X.max(axis=0))
+    ranges = ColumnRanges(5)
+    sampled_rows(da.from_array(X, chunks=((10, 0, 10), (5,))), np.array([0]), ranges)
+    np.testing.assert_array_equal(ranges.lo, X.min(axis=0))
+    np.testing.assert_array_equal(ranges.hi, X.max(axis=0))
