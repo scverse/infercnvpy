@@ -68,7 +68,7 @@ _KMEANS_ROWS = 8192  # rows per matrix product of k-means
 LABELS = ("aneuploid", "diploid", "not.defined", "undetermined")
 UNDETERMINED = LABELS[3]
 
-#: Markers of immune, endothelial and stromal cells, which are rarely tumour cells
+#: Markers of immune, endothelial and stromal cells, which are rarely tumor cells
 NORMAL_MARKERS = (
     "PTPRC", "CD3E", "CD3D", "CD2", "CD7", "NKG7", "GNLY", "MS4A1", "CD79A", "CD19", "CD14", "LYZ", "CD68", "CSF1R",
     "FCGR3A", "TYROBP", "FCER1G", "C1QA", "C1QB", "CPA3", "TPSAB1", "PECAM1", "VWF", "CDH5", "CLDN5", "KDR", "COL1A1",
@@ -92,13 +92,13 @@ _DOSAGE_PRIOR = 1.0  # strength of the shrinkage of dosage weights towards 1, in
 _MIN_PRIOR = 0.01  # smallest prior clone probability of a cell type
 _NP_SWEEPS = 1000  # most updates of the spatial posteriors
 _NP_TOL = 1e-5  # largest change of a posterior at convergence
-_AMP_TUMOUR = 0.1  # smooth amplitude (log ratio) of an aneuploid clone's profile, see `_smooth_amplitude`
+_AMP_TUMOR = 0.1  # smooth amplitude (log ratio) of an aneuploid clone's profile, see `_smooth_amplitude`
 _N_PASSES = 4
 _RESEED_GAP = 0.05  # how much flatter than the diploid clone another clone must be to restart the passes from it
 _FLAT_GAP = 0.15  # difference of the cluster means of group flatness that counts as a clear split
 _MARKER_FOLD = 5.0
 _MARKER_MIN = 1e-3  # share of counts in the markers above which a group can be marker-rich
-_MAX_SPILL = 0.5  # largest spillover fraction of tumour transcripts in a normal cell's diploid expectation
+_MAX_SPILL = 0.5  # largest spillover fraction of tumor transcripts in a normal cell's diploid expectation
 _MIN_SEED = 3  # cells of the smallest group that can be the first diploid group (a rare normal population)
 _MIN_RESEED = 10  # cells of the smallest clone that can become the diploid clone later
 _MIN_SEG_GENES = 20  # genes of the shortest run that counts towards the burden; fewer on small panels
@@ -155,7 +155,7 @@ def copy_number(
     4. the expression deviation of a type is the gene-level part of its pooled profile that the HMM does not
        explain, so it holds the cell type but no copy number signal. A clone's profile is an HMM (8 copy-ratio states,
        transitions by genomic distance, `segment_length`) on the gene-level log ratio of its pooled counts to their
-       expectation, corrected for the cell's capture of highly expressed genes and centred on its most common level;
+       expectation, corrected for the cell's capture of highly expressed genes and centered on its most common level;
     5. assign cells to clones by EM on the negative binomial likelihood of their window counts. Profiles are
        cross-fitted (windows of one parity are scored with the profile fitted on the other parity), clones without
        differences merge, and clones whose likelihood gain does not pay for their segments are dropped;
@@ -171,16 +171,16 @@ def copy_number(
     (Smart-seq2) its profiles are poor.
 
     .. warning::
-        Without reference cells, the diploid baseline comes from the sample itself. When tumour cells far outnumber
-        normal cells, especially at low depth (a few hundred counts per cell), the baseline can land on a tumour group,
-        and then the labels are inverted: tumour cells are called diploid and normal cells aneuploid. Pass known normal
+        Without reference cells, the diploid baseline comes from the sample itself. When tumor cells far outnumber
+        normal cells, especially at low depth (a few hundred counts per cell), the baseline can land on a tumor group,
+        and then the labels are inverted: tumor cells are called diploid and normal cells aneuploid. Pass known normal
         cells with `reference_key` and `reference_cat` in such samples. `adata.uns["copy_number"]["seed"]` shows how
         the baseline was found, and a warning flags the least certain case.
 
     .. warning::
         With reference cells, weak clones in shallow data can be called diploid. After each pass, an aneuploid clone
         whose profile has a smooth amplitude below 0.1 merges into the diploid clone, and in shallow data a clone that
-        mixes tumour and normal cells can stay below that cut. When a run with reference cells calls few or no cells,
+        mixes tumor and normal cells can stay below that cut. When a run with reference cells calls few or no cells,
         run without a reference as well and compare the two.
 
         Every normal cell type in the sample belongs in the reference, including stromal cells such as smooth muscle
@@ -223,7 +223,7 @@ def copy_number(
     min_burden
         Fraction of genes in non-neutral states below which two profiles count as the same copy number.
     normal_markers
-        Marker genes of cell types that are rarely tumour cells (a list, or a dict of lists per cell type), matched
+        Marker genes of cell types that are rarely tumor cells (a list, or a dict of lists per cell type), matched
         against `adata.var_names`. Expression groups whose share of counts in these genes is far above that of the
         marker-poor groups (and that are flatter than the median group) join the first diploid baseline, next to the
         groups that are flattest along the genome, and keep the baseline from moving to a flatter clone later.
@@ -244,7 +244,7 @@ def copy_number(
         e.g. `"spatial_connectivities"` from :func:`squidpy.gr.spatial_neighbors_knn`. Any graph with non-negative
         weights works, and entries set to 0 are not edges. The prior of a cell over the clones becomes a mixture of its
         type's prior and the weighted mean of its neighbors' posteriors, the cell itself left out. The mixing weight is
-        estimated from the data by maximising the likelihood of each cell given its neighbors, and then the posteriors
+        estimated from the data by maximizing the likelihood of each cell given its neighbors, and then the posteriors
         are updated until they no longer change. A cell with strong evidence of its own keeps its call, and a cell with
         little evidence follows its neighborhood. A cell without neighbors keeps its per-cell posterior. On imaging
         data, where single cells hold few counts and neighbors usually share their clone, this lowers the errors
@@ -252,7 +252,7 @@ def copy_number(
         start.
 
         With `reference_key`, edges between reference and other cells are dropped: a reference cell says nothing about
-        the copy number of a tumour cell next to it, and the other way round. Reference cells take the diploid clone
+        the copy number of a tumor cell next to it, and the other way round. Reference cells take the diploid clone
         as their neighbors' state, so their probability of being aneuploid can only go down. Without a reference, use
         the same split with your own annotation by setting the graph's entries between known normal cells and the
         other cells to 0 (see :func:`~infercnvpy.tl.smooth_cnv`). `copy_number_llr` stays the cell's own log
@@ -262,7 +262,7 @@ def copy_number(
     max_neighbor_weight
         Largest weight that a cell's neighbors get in its prior when `connectivity_key` is given; the weight itself is
         estimated from the data, up to this value. A lower value lets a cell's own data count more, which reduces the
-        spread of calls into normal cells next to a tumour; a higher value smooths more, which helps in shallow data.
+        spread of calls into normal cells next to a tumor; a higher value smooths more, which helps in shallow data.
         Between 0 and 1 (not included); 0 turns the spatial prior off, so the results are those of single cells.
     force_calls
         Call cells even where the data hold too little copy number information. With fewer than 1,000 genes passing
@@ -318,7 +318,7 @@ def copy_number(
     `adata.obs["copy_number_spillover"]` : :class:`float`
         Fraction of the cell's counts that is best explained by the pooled expression of the aneuploid cells, mixed
         with its own type's diploid expression (0 to 1). High values in normal cell types point to segmentation merges
-        or doublets with tumour cells; for cells of normal types (marker-rich types, or reference types), up to 0.5 of
+        or doublets with tumor cells; for cells of normal types (marker-rich types, or reference types), up to 0.5 of
         this mixture is part of the diploid expectation, so that spillover alone does not make them aneuploid.
     `adata.obs["copy_number_stability"]` : :class:`float`
         Share of the `n_restarts` fits whose call for the cell (aneuploid or diploid, without the spatial prior)
@@ -421,7 +421,7 @@ def copy_number(
         if not force_calls and (lay.n_genes < _MIN_PANEL_GENES or depth < _MIN_MEDIAN_COUNTS):
             log.warning(
                 "copy_number: %d genes pass the filters, with a median of %d counts per cell; reliable calls need at "
-                "least %d genes and %d counts per cell, so %d cells are labelled %r. For small panels, use "
+                "least %d genes and %d counts per cell, so %d cells are labeled %r. For small panels, use "
                 "`tl.infercnv` with reference cells, smoothed with `tl.smooth_cnv`; `force_calls=True` calls the "
                 "cells anyway.",
                 lay.n_genes, depth, _MIN_PANEL_GENES, _MIN_MEDIAN_COUNTS, n, UNDETERMINED,
@@ -472,7 +472,7 @@ def copy_number(
                     run[1:5] = out
             # the restart whose aneuploid/diploid calls agree best with those of the others (the medoid). Agreement
             # is the share of cells with the same call, not the adjusted Rand index: a fit with an inverted baseline
-            # (tumour cells diploid, normal cells aneuploid) splits the cells like a correct fit, so its ARI with it
+            # (tumor cells diploid, normal cells aneuploid) splits the cells like a correct fit, so its ARI with it
             # is 1
             calls = np.array([run[1][:, 1:].sum(axis=1) > 0.5 for run in runs])
             agreement = np.array([[(a == b).mean() for b in calls] for a in calls])
@@ -547,14 +547,14 @@ def copy_number(
         log.warning(
             "copy_number: the diploid baseline is uncertain. No group of cells is clearly flatter along the genome "
             "than the others (flatness gap %.3f, a clear split needs %.2f) and none is rich in normal markers, so the "
-            "single flattest group was taken; in samples with few normal cells this can be a tumour group, which "
+            "single flattest group was taken; in samples with few normal cells this can be a tumor group, which "
             "inverts the calls. Give known normal cells as `reference_key` / `reference_cat`.",
             flat_gap, _FLAT_GAP,
         )  # fmt: skip
     if n_an == 0 and is_ref is None:
         log.warning(
             "copy_number: no cell is called aneuploid. The diploid baseline comes from the sample itself, so a sample "
-            "without normal cells (tumour only, a cell line) is called diploid; give reference cells "
+            "without normal cells (tumor only, a cell line) is called diploid; give reference cells "
             "(`reference_key`, `reference_cat`) if that is the case."
         )
     elif n_an == 0:
@@ -638,7 +638,7 @@ def _fit_clones(data, hmm, pcs, ref_fit, ref_share, n_clusters, rng, min_burden,
                 continue
         amp = np.array([_smooth_amplitude(em.final[3][i], lay) for i in range(k)])
         log.debug("copy_number: pass %d, clone amplitudes %s", pass_, np.round(amp, 3))
-        target[amp < _AMP_TUMOUR] = 0
+        target[amp < _AMP_TUMOR] = 0
         if (target == np.arange(k)).all():
             break
         assign = _compact(target[assign])
@@ -765,7 +765,7 @@ def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
 
     For cell i with tempered likelihoods `L_i(c) = exp(lt_i(c))` and type prior `pi_i(c)`, the posterior is
     `q_i(c) ~ L_i(c) * ((1 - lam) * pi_i(c) + lam * m_i(c))`, where `m_i` is the weighted mean of the neighbors'
-    posteriors `q_j` (i itself excluded). `lam` maximises the pseudo-likelihood `sum_i log sum_c L_i(c) * prior_i(c)`
+    posteriors `q_j` (i itself excluded). `lam` maximizes the pseudo-likelihood `sum_i log sum_c L_i(c) * prior_i(c)`
     with `m_i` from the per-cell posteriors (concave in `lam`); then damped synchronous updates run to a fixed point.
     With `ref`, edges between reference and other cells are dropped, and reference cells use the diploid clone as
     `m_i`. `lam` is at most `max_weight`; with 0 or without neighbors, cells keep their per-cell posterior `resp`.
@@ -805,7 +805,7 @@ def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
 
 
 def _neighbor_weight(G, deg, lik, base, q, free, max_weight) -> float:
-    """Weight `lam` of the neighbors in the prior that maximises `sum_i log sum_c L_i(c) ((1-lam) pi_i + lam m_i)`.
+    """Weight `lam` of the neighbors in the prior that maximizes `sum_i log sum_c L_i(c) ((1-lam) pi_i + lam m_i)`.
 
     The objective is a sum of logs of functions linear in `lam`, so it is concave; its derivative falls
     monotonically, and bisection finds the root in [0, `max_weight`].
@@ -925,7 +925,7 @@ class _Data:
         """First principal components of log-normalised expression of the most variable genes, from all cells.
 
         Two passes over the counts: per-gene moments pick the highly variable genes, then their Gram matrix gives the
-        covariance (`G / n - mean mean^T`), so the centred matrix is never built. The Gram matrix is summed from the
+        covariance (`G / n - mean mean^T`), so the centered matrix is never built. The Gram matrix is summed from the
         sparse rows when they are sparse, else from dense blocks of rows with BLAS.
         """
         lay, n = self.lay, len(self.cells)
@@ -1195,7 +1195,7 @@ def _groups(burden: np.ndarray, cut: float) -> np.ndarray:
 
 
 def _flatness(Y: np.ndarray, lay) -> float:
-    """Lag-1 autocorrelation along the genome of the window medians of a pooled log profile (not centred per gene)."""
+    """Lag-1 autocorrelation along the genome of the window medians of a pooled log profile (not centered per gene)."""
     bounds, chrom = lay.blocks(_block_size(lay), last_takes_rest=True)
     vals = np.empty(len(chrom))
     K.block_medians(np.log(Y + 0.5), bounds, vals)
@@ -1279,7 +1279,7 @@ class _EM:
 
         The pooled profile of a type, in blocks of 25 genes, is fitted as a non-negative mixture of the aneuploid clone
         profiles (weights summing to at most 1, the rest is diploid). A type of normal cells has weights near 0 even
-        when its expression differs from the baseline smoothly, a tumour type near 1, and a mixed type its tumour
+        when its expression differs from the baseline smoothly, a tumor type near 1, and a mixed type its tumor
         fraction. The fit uses the pooled profiles, not the current assignments, so it does not reinforce them.
         Types of reference cells are known to be diploid and keep the diploid prior: a fit of their nearly flat profile
         on a nearly flat clone can give that clone all the weight.
@@ -1349,11 +1349,11 @@ class _EM:
         K.nb_moments(data.Yw, size, self.types, assign, share, use, num, den)
         phi = 1.0 / np.clip(num.sum(0) / np.maximum(den.sum(0), 1e-12), 1e-3, 1e2)
         # spillover: the pooled window shares of the aneuploid cells, mixed into the diploid expectation of cells of
-        # normal types (marker-rich or reference types; segmentation merges with tumour cells in imaging data)
-        tumour = (assign > 0).astype(data.Yw.dtype)
-        g = (tumour @ data.Yw).astype(np.float64) * use if tumour.any() else np.zeros(len(wb))
+        # normal types (marker-rich or reference types; segmentation merges with tumor cells in imaging data)
+        tumor = (assign > 0).astype(data.Yw.dtype)
+        g = (tumor @ data.Yw).astype(np.float64) * use if tumor.any() else np.zeros(len(wb))
         g = np.ascontiguousarray(g / max(g.sum(), 1e-12))
-        spill_ok = self.normal_type & bool(tumour.any())
+        spill_ok = self.normal_type & bool(tumor.any())
         with np.errstate(divide="ignore"):
             log_share = np.log(share)
         ll, spill = np.empty((len(assign), len(mu))), np.empty(len(assign))

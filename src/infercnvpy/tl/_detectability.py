@@ -107,10 +107,10 @@ def detectability(
         Number of cells for `gain_ratio` and `loss_ratio`. `1` gives what a single cell shows.
     gain
         Copy ratio of the gain for `cells_gain`. 1.5 is one extra copy in a diploid genome. In a near-tetraploid
-        tumour, one extra copy is 1.25.
+        tumor, one extra copy is 1.25.
     loss
         Copy ratio of the loss for `cells_loss`. 0.5 is one copy lost in a diploid genome, and 0.75 in a
-        near-tetraploid tumour.
+        near-tetraploid tumor.
     alpha
         One-sided level of the test of each arm. The default, 0.001, is about 0.05 with a Bonferroni correction for 40
         arms.
@@ -205,10 +205,10 @@ def detectability(
 
     Solved for :math:`n`, the condition gives `cells_gain` and `cells_loss`, and solved for :math:`r` the smallest
     detectable ratio. The test knows the normal expression of every cell type, so its numbers are a lower bound. It
-    also assumes that expression follows the DNA copies one to one, that the tumour is near diploid (set `gain` and
+    also assumes that expression follows the DNA copies one to one, that the tumor is near diploid (set `gain` and
     `loss` otherwise), and that all tested cells carry the change. With a share :math:`f` of clone cells among the
     tested cells, multiply the cells needed by :math:`1 / f^2`. The test treats cells as independent, so a program
-    shared by all cells of a clone (a tumour state, for example) is not averaged away by more cells. It covers whole
+    shared by all cells of a clone (a tumor state, for example) is not averaged away by more cells. It covers whole
     arms only, so focal events such as an amplification of SOX2 or MYC or a deletion of CDKN2A are not covered.
 
     **Depths.** With `depth`, the counts are thinned at random to each target median per cell, and the null variance
@@ -219,7 +219,7 @@ def detectability(
     expression data at least as deep as the target.
 
     **Calibration.** We injected arm gains of 1.5x and losses of 0.5x into cells of a breast cancer section measured
-    with 10x Atera (whole transcriptome in situ), namely fibroblasts, normal epithelium and one tumour clone, cut to
+    with 10x Atera (whole transcriptome in situ), namely fibroblasts, normal epithelium and one tumor clone, cut to
     five panels at two depths. An oracle score test that is given the true expected expression needed 0.6 to 1.1
     times the cells of the achievable column, and the two rank the arms alike (Spearman 0.98 to 0.99). The ideal
     column over-promises by up to about 3 times on deep, wide panels, where the null variance is largest.
@@ -236,7 +236,7 @@ def detectability(
 
     On panels of 1,000 genes or fewer, `tl.infercnv` missed about a third of the arm events at any number of cells.
     When many arms change at once, it also shifts arms without a change, by smoothing over arm borders and by
-    centring each cell. :func:`infercnvpy.tl.copy_number` detects clones rather than single arms, so the table
+    centering each cell. :func:`infercnvpy.tl.copy_number` detects clones rather than single arms, so the table
     doesn't apply to it.
 
     **Small panels.** On panels with fewer than 1,000 usable genes or below a median of 150 counts per cell,

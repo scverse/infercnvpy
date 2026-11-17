@@ -111,7 +111,7 @@ def hmm_posteriors(Y, V, stay, means, log_prior, nu, post_mean, post_neutral, st
 def _spillover(y, a, g):
     """Spillover fraction of one cell.
 
-    The fraction `s` in [0, 1] of a cell's counts `y` that maximises the Poisson likelihood of the window shares
+    The fraction `s` in [0, 1] of a cell's counts `y` that maximizes the Poisson likelihood of the window shares
     `(1 - s) a + s g` (`a`: the cell's own diploid shares, `g`: the pooled shares of aneuploid cells). The likelihood
     is concave in `s`, so its derivative has at most one root: Newton steps kept inside a bracket that bisection
     narrows when a step leaves it.
