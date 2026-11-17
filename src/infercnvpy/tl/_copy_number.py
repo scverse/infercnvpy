@@ -24,6 +24,7 @@ from scipy.ndimage import median_filter
 from scipy.optimize import nnls
 from scipy.sparse.linalg import eigsh
 from scipy.spatial.distance import squareform
+from tqdm.auto import tqdm
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
@@ -130,6 +131,7 @@ def copy_number(
     key_added: str = "copy_number",
     inplace: bool = True,
     n_jobs: int | None = None,
+    show_progress: bool = True,
 ) -> None | tuple[pd.DataFrame, np.ndarray, dict, np.ndarray | None]:
     """Infer copy number profiles, clones and aneuploid/diploid labels with a clone-level count model.
 
@@ -290,6 +292,9 @@ def copy_number(
         Write the results to `adata`. If `False`, return them.
     n_jobs
         Number of threads.
+    show_progress
+        Show a progress bar over the restarts, with the current step (preprocessing, PCA, types, EM, neighbour
+        prior). The environment variable ``TQDM_DISABLE=1`` turns it off as well.
 
     Returns
     -------
@@ -403,7 +408,8 @@ def copy_number(
         expr = sp.csr_matrix(expr)
     excluded = _excluded_genes(adata.var_names, exclude_genes)
 
-    with numba_threads(n_jobs):
+    with numba_threads(n_jobs), _progress(n_restarts, show_progress) as bar:
+        bar.set_postfix_str("preprocessing")
         source = _Rows(expr, chunksize)
         start = log.debug("copy_number: %d cells x %d genes", adata.n_obs, adata.n_vars)
         cells, lay, var, candidates = _filter_cells_genes(
@@ -447,6 +453,7 @@ def copy_number(
 
         # expression clusters: PCA once; k-means and everything after it once per restart
         n_clusters = n_clusters or int(np.clip(n_fit // 50, 8, 40))
+        bar.set_postfix_str("PCA")
         pcs = data.expression_pcs()
         ref_fit = None if is_ref is None else is_ref[cells[fit]]
         ref_all = None if is_ref is None else is_ref[cells]
@@ -459,14 +466,16 @@ def copy_number(
         pcs_all = data.project(source, cells) if n_fit < n else None
         runs = []  # (em, resp, llr, baseline method, flatness gap) of each restart
         for r, seed in enumerate(np.random.SeedSequence(random_state).spawn(n_restarts)):
+            bar.set_description(f"copy_number restart {r + 1}/{n_restarts}", refresh=False)
             clusters, em, resp, llr, *baseline = _fit_clones(
                 data, hmm, pcs, ref_fit, n_clusters, np.random.default_rng(seed), min_burden, n_iter,
-                (var, candidates, is_marker, normal_markers is not None),
+                (var, candidates, is_marker, normal_markers is not None), bar.set_postfix_str,
             )  # fmt: skip
             if n_fit < n:  # assign every cell with the fitted model, in one pass over the counts
                 resp, llr = em.assign_all(source, cells, pcs_all, pcs, clusters, ref_all)
             runs.append((em, resp, llr, *baseline))
             log.debug("copy_number: restart %d, %d clones", r, resp.shape[1])
+            bar.update()
         # the restart whose aneuploid/diploid calls agree best with those of the others (the medoid). Agreement is
         # the share of cells with the same call, not the adjusted Rand index: a fit with an inverted baseline (tumour
         # cells diploid, normal cells aneuploid) splits the cells like a correct fit, so its ARI with it is 1
@@ -478,6 +487,7 @@ def copy_number(
         em, resp, llr, baseline_method, flat_gap = runs[best]
         spatial = None
         if G is not None and resp.shape[1] > 1:
+            bar.set_postfix_str("neighbour prior")
             lt, log_prior = em.post_terms
             resp, spatial = _neighbour_prior(G, cells, resp, lt, log_prior, ref_all, max_neighbour_weight)
         k = resp.shape[1]
@@ -559,15 +569,17 @@ def copy_number(
     )  # fmt: skip
 
 
-def _fit_clones(data, hmm, pcs, ref_fit, n_clusters, rng, min_burden, n_iter, markers):
+def _fit_clones(data, hmm, pcs, ref_fit, n_clusters, rng, min_burden, n_iter, markers, stage=lambda _: None):
     """One fit of the clones (steps 2 to 7 of `copy_number`), with the k-means starts drawn from `rng`.
 
     `markers` is `(var, candidates, is_marker, use_markers)`: the gene table, the candidate genes, the normal markers
     and whether marker-rich types are normal types. Returns the expression types, the fitted `_EM`, the posteriors
-    and log likelihood ratios of the fitted cells, the baseline method and the flatness gap.
+    and log likelihood ratios of the fitted cells, the baseline method and the flatness gap. `stage` is called with
+    the name of each step (for the progress bar).
     """
     var, candidates, is_marker, use_markers = markers
     lay = data.lay
+    stage("types")
     if ref_fit is None:
         clusters = _kmeans(pcs, min(n_clusters, len(pcs)), rng)
     else:
@@ -603,6 +615,7 @@ def _fit_clones(data, hmm, pcs, ref_fit, n_clusters, rng, min_burden, n_iter, ma
     reseeded = "markers" in baseline_method  # marker-rich groups outweigh flatness: no restart
     # passes: after each, a clearly flatter clone becomes diploid and the passes restart from it, or clones without
     # a smooth profile merge into the diploid clone; a last single-iteration pass follows the last change
+    stage("EM")
     for pass_ in range(_N_PASSES + 1):
         em.set_baseline(normal)
         assign, resp, llr = em.run(assign, n_iter if pass_ < _N_PASSES else 1)
@@ -634,6 +647,13 @@ def _fit_clones(data, hmm, pcs, ref_fit, n_clusters, rng, min_burden, n_iter, ma
         if not fixed:
             normal = assign == 0
     return clusters, em, resp, llr, baseline_method, flat_gap
+
+
+def _progress(n_restarts: int, show: bool) -> tqdm:
+    """A progress bar over the restarts, with the current step as its postfix (off unless `show`)."""
+    if show:  # leave `disable` to tqdm, so that TQDM_DISABLE applies
+        return tqdm(total=n_restarts, desc="copy_number", unit="restart")
+    return tqdm(total=n_restarts, desc="copy_number", unit="restart", disable=True)
 
 
 def _outputs(adata, cells, key_added, inplace, labels, clones, clone_names, cna, uns, gene_values, **values):

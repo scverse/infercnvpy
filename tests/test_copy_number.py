@@ -195,6 +195,18 @@ def test_ari():
     assert abs(M._ari(rng.integers(0, 2, 10_000), rng.integers(0, 2, 10_000))) < 0.01  # chance
 
 
+@pytest.mark.parametrize("show", [False, True])
+def test_copy_number_progress_bar(show, capsys):
+    """The bar shows on stderr with `show_progress` (unless TQDM_DISABLE is set) and not without it."""
+    import os
+
+    if show and os.environ.get("TQDM_DISABLE"):
+        pytest.skip("TQDM_DISABLE is set")
+    obs = cnv.tl.copy_number(_simulate(), n_restarts=2, n_jobs=2, inplace=False, show_progress=show)[0]
+    assert ("copy_number restart 2/2" in capsys.readouterr().err) == show
+    assert _accuracy(_simulate(), obs) >= 0.98
+
+
 def test_copy_number_restarts():
     """The returned fit is the medoid of the restarts; restart r is the same fit for any `n_restarts` > r."""
     adata = _simulate()
