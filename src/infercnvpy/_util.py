@@ -2,7 +2,7 @@ import inspect
 import re
 import sys
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator
 from functools import wraps
 from textwrap import dedent, indent
 from typing import Any
@@ -80,8 +80,8 @@ def _choose_mtx_rep(adata, use_raw=False, layer=None):
 
 
 def _listed[T](x: T) -> T | list:
-    """`x` as a list if it is a collection or an iterator other than a string or mapping, so it can be read twice."""
-    return list(x) if pd.api.types.is_list_like(x) and not isinstance(x, str | Mapping) else x
+    """`x` as a list if it is an iterator (e.g. a generator or `map`), so it can be read twice."""
+    return list(x) if isinstance(x, Iterator) else x
 
 
 def _params_for_uns(**params) -> dict:
