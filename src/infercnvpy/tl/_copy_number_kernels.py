@@ -437,3 +437,37 @@ def neighbour_prior_sweep(indptr, indices, w, lik, base, lam, fixed, q, out):
             tot += p
         for c in range(k):
             out[i, c] /= tot
+
+
+@njit_parallel
+def kmeans_assign(XC, X, c2, k, labels, dist, sums, counts):
+    """Nearest centre of each row for several k-means starts at once, and the sums of the rows per centre.
+
+    The centres of all starts are stacked (start `s` owns centres `s k` to `s k + k - 1`); `XC = X @ C^T` comes from
+    one matrix product for all of them and `c2` holds their squared norms. Writes each row's cluster for each start
+    (`labels`, rows x starts) and its squared distance to that centre (`dist`), and adds the row to its centres' sums
+    and counts (`sums`: chunks x centres x dims, `counts`: chunks x centres; one slab per chunk of rows, summed by the
+    caller).
+    """
+    n, d = X.shape
+    n_starts = labels.shape[1]
+    n_chunks = sums.shape[0]
+    step = (n + n_chunks - 1) // n_chunks
+    for ch in prange(n_chunks):
+        for i in range(ch * step, min(n, (ch + 1) * step)):
+            x2 = 0.0
+            for t in range(d):
+                x2 += X[i, t] * X[i, t]
+            for s in range(n_starts):
+                best = s * k
+                bd = np.inf
+                for j in range(s * k, (s + 1) * k):
+                    dd = c2[j] - 2.0 * XC[i, j]
+                    if dd < bd:
+                        bd = dd
+                        best = j
+                labels[i, s] = best - s * k
+                dist[i, s] = max(bd + x2, 0.0)
+                counts[ch, best] += 1.0
+                for t in range(d):
+                    sums[ch, best, t] += X[i, t]

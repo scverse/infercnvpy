@@ -56,7 +56,9 @@ HG38_LENGTHS = {
     "chr21": 46709983, "chr22": 50818468, "chrX": 156040895, "chrY": 57227415,
 }  # fmt: skip
 
-_KMEANS_ITER = 20
+_KMEANS_ITER = 30  # most Lloyd iterations of k-means
+_KMEANS_STARTS = 10  # random starts of k-means, run together
+_KMEANS_ROWS = 8192  # rows per matrix product of k-means
 
 LABELS = ("aneuploid", "diploid", "not.defined", "undetermined")
 UNDETERMINED = LABELS[3]
@@ -136,10 +138,11 @@ def copy_number(
 
     1. keep cells with at least `min_genes` detected genes and genes detected in at least `min_detection` of them
        (on chromosomes named like "chr1"); sum each cell's counts in windows of `window_size` genes;
-    2. cluster cells by expression (k-means on principal components of the most variable genes); these clusters
-       are the expression types (with `reference_cat`, the reference cells and the other cells are clustered
-       separately, so that every type is either reference or not). A copy number HMM on the difference of the pooled profiles of every pair of types
-       groups the types that differ in expression only;
+    2. cluster cells by expression (k-means with 10 random starts on the principal components of the most variable
+       genes, both on all cells); these clusters are the expression types (with `reference_cat`, the reference cells
+       and the other cells are clustered separately, so that every type is either reference or not). A copy number
+       HMM on the difference of the pooled profiles of every pair of types groups the types that differ in expression
+       only;
     3. take the first baseline from the groups whose pooled profile is flat along the genome, and from groups that
        express `normal_markers` far above the rest (or from `reference_cat`);
     4. the expression deviation of a type is the gene-level part of its pooled profile that the HMM does not
@@ -1564,23 +1567,38 @@ def _csr(X) -> sp.csr_matrix:
     return X if sp.issparse(X) else sp.csr_matrix(X)
 
 
-def _subsample(idx: np.ndarray, n_max: int, rng: np.random.Generator) -> np.ndarray:
-    return idx if len(idx) <= n_max else np.sort(rng.choice(idx, n_max, replace=False))
+def _kmeans(X: np.ndarray, k: int, rng, n_starts: int = _KMEANS_STARTS) -> np.ndarray:
+    """Cluster of each row of `X`: Lloyd's k-means on all rows, the best of `n_starts` random starts; no empty clusters.
 
-
-def _kmeans(X: np.ndarray, k: int, rng) -> np.ndarray:
-    """Cluster of each row of `X` after Lloyd's k-means fitted on at most `20 k` rows; no empty clusters."""
-    sub = X[_subsample(np.arange(len(X)), 20 * k, rng)]
-    centres = sub[rng.choice(len(sub), k, replace=False)]
-    for _ in range(_KMEANS_ITER):
-        a = _nearest(sub, centres)
-        counts = np.bincount(a, minlength=k)
-        new = np.zeros_like(centres)
-        np.add.at(new, a, sub)
-        filled = counts > 0
-        centres[filled] = new[filled] / counts[filled, None]
-    assign = _nearest(X, centres)
-    return np.unique(assign, return_inverse=True)[1]
+    Each start begins at `k` random rows, and the starts run together: per iteration, one matrix product gives the
+    distances of the rows to the centres of every start, and one pass finds the nearest centres and sums the rows. A
+    cluster that empties restarts at the row farthest from its centre. The iterations stop when no row changes its
+    cluster (at most `_KMEANS_ITER`), and the start with the smallest sum of squared distances is kept.
+    """
+    X = np.ascontiguousarray(X, dtype=np.float64)
+    n, d = X.shape
+    k = min(k, n)
+    C = np.concatenate([X[rng.choice(n, k, replace=False)] for _ in range(n_starts)])
+    labels = np.full((n, n_starts), -1, dtype=np.int64)
+    dist = np.empty((n, n_starts))
+    for it in range(_KMEANS_ITER + 1):
+        previous = labels.copy()
+        sums, counts = np.zeros((_PCA_CHUNKS, len(C), d)), np.zeros((_PCA_CHUNKS, len(C)))
+        c2 = (C**2).sum(axis=1)
+        for i0 in range(0, n, _KMEANS_ROWS):
+            rows = slice(i0, min(n, i0 + _KMEANS_ROWS))
+            K.kmeans_assign(X[rows] @ C.T, X[rows], c2, k, labels[rows], dist[rows], sums, counts)
+        size, total = counts.sum(axis=0), sums.sum(axis=0)
+        empty = size == 0
+        if it == _KMEANS_ITER or (not empty.any() and (labels == previous).all()):
+            break
+        C = np.where(empty[:, None], C, total / np.maximum(size, 1)[:, None])
+        for j in np.flatnonzero(empty):
+            far = int(np.argmax(dist[:, j // k]))
+            C[j] = X[far]
+            dist[far, j // k] = -1.0
+    best = int(np.argmin(dist.sum(axis=0)))
+    return np.unique(labels[:, best], return_inverse=True)[1]
 
 
 def _kmeans_split(X: np.ndarray, k: int, rng, ref: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
