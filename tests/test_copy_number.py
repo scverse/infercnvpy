@@ -169,6 +169,22 @@ def test_kmeans_does_not_depend_on_threads():
     np.testing.assert_array_equal(one, two)
 
 
+@pytest.mark.parametrize("size", [None, 4, 7, 25, 1000])
+def test_block_medians_match_array_split(size):
+    adata = _simulate(n_tumour=20, n_normal=20, genes=97)
+    lay = _layout(adata, min_genes=5)[1]
+    x = np.random.default_rng(0).normal(size=lay.n_genes)
+    vals, ch = M._block_medians(x, lay, size)
+    size = M._block_size(lay) if size is None else size
+    ref = [
+        (np.median(x[part]), c)
+        for c, (g0, g) in enumerate(zip(lay.g0s, lay.gs, strict=True))
+        for part in np.array_split(np.arange(g0, g0 + g), max(1, g // size))
+    ]
+    np.testing.assert_array_equal(vals, [v for v, _ in ref])
+    np.testing.assert_array_equal(ch, [c for _, c in ref])
+
+
 def test_ari():
     a = np.array([0, 0, 0, 1, 1, 1])
     assert M._ari(a, a) == 1.0 and M._ari(a, 1 - a) == 1.0  # names don't matter

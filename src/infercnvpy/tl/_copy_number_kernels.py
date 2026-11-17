@@ -471,3 +471,10 @@ def kmeans_assign(XC, X, c2, k, labels, dist, sums, counts):
                 counts[ch, best] += 1.0
                 for t in range(d):
                     sums[ch, best, t] += X[i, t]
+
+
+@njit
+def block_medians(x, bounds, out):
+    """Median of the profile `x` (genomic order) in each block of genes `bounds[b]:bounds[b + 1]`."""
+    for b in range(out.shape[0]):
+        out[b] = np.median(x[bounds[b] : bounds[b + 1]])

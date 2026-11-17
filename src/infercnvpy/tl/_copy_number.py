@@ -1020,16 +1020,16 @@ def _expression_deviation(resid: np.ndarray, pois: np.ndarray) -> np.ndarray:
     return out
 
 
-def _robust_var(x: np.ndarray) -> float:
-    d = np.diff(x)
-    return float((1.4826 * np.median(np.abs(d - np.median(d)))) ** 2 / 2)
+def _robust_var(x: np.ndarray) -> np.ndarray:
+    """Noise variance along each profile (rows), from the median absolute deviation of the differences of neighbours."""
+    d = np.diff(x, axis=-1)
+    return (1.4826 * np.median(np.abs(d - np.median(d, axis=-1, keepdims=True)), axis=-1)) ** 2 / 2
 
 
 def _scale(lr, pois, gene_var):
-    """Total variance per gene: expression variance (`gene_var` scaled to the profile) plus Poisson variance."""
+    """Total variance per gene of each profile (rows): the expression variance `gene_var`, scaled, plus Poisson."""
     resid = lr / np.sqrt(gene_var + pois)
-    s2 = max(_robust_var(resid), 1e-4)
-    return s2 * (gene_var + pois)
+    return np.maximum(_robust_var(resid), 1e-4)[:, None] * (gene_var + pois)
 
 
 def _gene_variability(Yc, Sc, lay) -> np.ndarray:
@@ -1057,7 +1057,7 @@ def _pairwise_burden(hmm, Yc, Sc, gene_var, lay) -> np.ndarray:
         batch = pairs[s : s + 200]
         y = np.array([L[i] - L[j] for i, j in batch])
         y -= np.median(y, axis=1, keepdims=True)
-        v = np.array([_scale(y[t], P[i] + P[j], gene_var) for t, (i, j) in enumerate(batch)])
+        v = _scale(y, np.array([P[i] + P[j] for i, j in batch]), gene_var)
         y = _remove_level(y, v, bmean, lay)
         pm, pn, _ = hmm(y, v)
         for t, (i, j) in enumerate(batch):
@@ -1228,7 +1228,7 @@ class _EM:
         self.Yr = self.data.pooled(normal.astype(np.int64), 2)[0][1]
         self.b = (self.Yr + 0.5) / (self.Yr + 0.5).sum()
         lr, pois = _log_ratio(self.Yt, self.St[:, None] * self.b[None, :], self.Yr[None, :])
-        v = np.array([_scale(lr[i], pois[i], self.gene_var) for i in range(len(lr))])
+        v = _scale(lr, pois, self.gene_var)
         lr = _remove_level(lr, v, self.b, self.data.lay)
         pm = self.hmm(lr, v)[0]
         self.e = _expression_deviation(lr - pm, pois)
@@ -1268,7 +1268,7 @@ class _EM:
         np.add.at(Skt, (assign, self.types), data.size)
         E = self.b[None, :] * (Skt @ np.exp(self.e))
         lr, pois = _log_ratio(Y, E, self.Yr[None, :])
-        v = np.array([_scale(lr[i], pois[i], self.gene_var) for i in range(k)])
+        v = _scale(lr, pois, self.gene_var)
         lr = _remove_level(lr, v, self.b, self.data.lay)
         return lr - np.array([_mode(x, self.data.lay) for x in lr])[:, None], v
 
@@ -1515,14 +1515,11 @@ def _block_size(lay) -> int:
 
 
 def _block_medians(lr: np.ndarray, lay, size: int | None = None):
-    size = _block_size(lay) if size is None else size
-    vals, ch = [], []
-    for c, (g0, g) in enumerate(zip(lay.g0s, lay.gs, strict=True)):
-        nb = max(1, g // size)
-        for part in np.array_split(np.arange(g0, g0 + g), nb):
-            vals.append(np.median(lr[part]))
-            ch.append(c)
-    return np.array(vals), np.array(ch)
+    """Median of the profile `lr` in each block of genes (see `_Layout.blocks`), and the chromosome of each block."""
+    bounds, ch = lay.blocks(_block_size(lay) if size is None else size)
+    out = np.empty(len(ch))
+    K.block_medians(np.ascontiguousarray(lr, dtype=np.float64), bounds, out)
+    return out, ch
 
 
 def _mode(lr: np.ndarray, lay) -> float:
@@ -1586,6 +1583,23 @@ class _Layout:
         self.chrom = var["chromosome"].to_numpy()[self.order].astype(str)
         self.start = var["start"].to_numpy()[self.order].astype(np.int64)
         self.end = var["end"].to_numpy()[self.order].astype(np.int64)
+        self._blocks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+    def blocks(self, size: int) -> tuple[np.ndarray, np.ndarray]:
+        """Bounds of the blocks of about `size` genes along each chromosome, and the chromosome of each block.
+
+        A chromosome of `g` genes has `max(1, g // size)` blocks, split as `np.array_split` does. Computed once per size.
+        """
+        if size not in self._blocks:
+            bounds, ch = [0], []
+            for c, g in enumerate(self.gs):
+                nb = max(1, int(g) // size)
+                sizes = np.full(nb, int(g) // nb)
+                sizes[: int(g) % nb] += 1
+                bounds.extend(bounds[-1] + np.cumsum(sizes))
+                ch.extend([c] * nb)
+            self._blocks[size] = (np.array(bounds, dtype=np.int64), np.array(ch, dtype=np.int64))
+        return self._blocks[size]
 
     def bins(self, bin_size: int) -> tuple[pd.DataFrame, dict[str, int], sp.csr_matrix]:
         """Genomic bins, the first bin of each chromosome, and the (bins x genes) matrix that averages each bin's genes.
