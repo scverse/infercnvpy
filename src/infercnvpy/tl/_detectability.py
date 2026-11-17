@@ -141,8 +141,8 @@ def detectability(
         One row per depth (in the order of `depth`), group (in the order of its categories) and arm (in genome order),
         with the columns
 
-        * `group` (categorical), the cell type (`"all"` without `groupby`). Reference types get rows too, which show what a change
-          in those cells would need;
+        * `group` (categorical), the cell type (`"all"` without `groupby`). Reference types get rows too, which show
+          what a change in those cells would need;
         * `depth`, the median counts per cell of all cells (the target of `depth`);
         * `depth_factor`, `depth` divided by the observed median counts per cell. Above 1 the rows are extrapolated,
           and above 2 they are beyond the range that was checked (a warning says so);
@@ -218,10 +218,11 @@ def detectability(
 
     **Calibration.** We injected arm gains of 1.5x and losses of 0.5x into cells of a breast cancer section measured
     with 10x Atera (whole transcriptome in situ), namely fibroblasts, normal epithelium and one tumour clone, cut to
-    five panels at two depths. An oracle score test that is given the true expected expression needed 0.6 to 1.1 times the cells of the achievable column, and the two rank the arms
-    alike (Spearman 0.98 to 0.99). The ideal column over-promises by up to about 3 times on deep, wide panels, where
-    the null variance is largest. :func:`infercnvpy.tl.infercnv` needed more cells than the achievable column, by a
-    factor that depends on the panel:
+    five panels at two depths. An oracle score test that is given the true expected expression needed 0.6 to 1.1
+    times the cells of the achievable column, and the two rank the arms alike (Spearman 0.98 to 0.99). The ideal
+    column over-promises by up to about 3 times on deep, wide panels, where the null variance is largest.
+    :func:`infercnvpy.tl.infercnv` needed more cells than the achievable column, by a factor that depends on the
+    panel:
 
     ===============================  ==============================
     panel                            cells relative to `cells_gain`
