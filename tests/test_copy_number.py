@@ -641,6 +641,23 @@ def test_copy_number_fit_on_sample(reference):
     assert obs["copy_number_clone"].notna().all()
 
 
+def test_copy_number_fit_on_sample_reads_counts_once_for_all_restarts(monkeypatch):
+    """With `max_fit_cells`, the passes over all cells' counts don't grow with `n_restarts`."""
+    adata = _simulate(n_tumour=300, n_normal=200)
+    passes = []
+    orig = M._row_blocks
+
+    def counting(source, rows):
+        passes[-1] += len(rows) > 250  # a pass over all cells, not over the sample of 250
+        return orig(source, rows)
+
+    monkeypatch.setattr(M, "_row_blocks", counting)
+    for n_restarts in (1, 3):
+        passes.append(0)
+        cnv.tl.copy_number(adata, n_jobs=2, inplace=False, max_fit_cells=250, n_restarts=n_restarts)
+    assert passes[0] == passes[1]
+
+
 def test_copy_number_filtered_cells_and_writing(tmp_path):
     """Cells removed by the filters get a neutral profile and the clone "not.defined", so the downstream tools work;
     the outputs (with dict-of-tuple markers) can be written."""

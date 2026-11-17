@@ -469,33 +469,38 @@ def copy_number(
             pcs = data.expression_pcs()
             pcs_all = data.project(source, cells) if n_fit < n else None
             ref_share = None if ref_all is None else float(ref_all.mean())
-            runs = []  # (em, resp, llr, baseline method, flatness gap) of each restart
+            runs = []  # (em, resp, llr, ll, types, baseline method, flatness gap) of each restart
             for r, child in enumerate(rng.spawn(n_restarts)):
                 bar.set_description(f"copy_number restart {r + 1}/{n_restarts}", refresh=False)
-                clusters, em, resp, llr, *baseline = _fit_clones(
+                em, resp, llr, ll, *baseline = _fit_clones(
                     data, hmm, pcs, ref_fit, ref_share, n_clusters, child, min_burden, n_iter, mlay,
                     bar.set_postfix_str,
                 )  # fmt: skip
-                if n_fit < n:  # assign every cell with the fitted model, in one pass over the counts
-                    resp, llr = em.assign_all(source, cells, pcs_all, pcs, clusters, ref_all)
-                runs.append((em, resp, llr, *baseline))
+                runs.append([em, resp, llr, ll, em.types, *baseline])
                 log.debug("copy_number: restart %d, %d clones", r, resp.shape[1])
                 bar.update()
+            if n_fit < n:  # assign every cell with each fitted model, in one pass over the counts
+                bar.set_postfix_str("assigning all cells")
+                assigned = _assign_all([run[0] for run in runs], source, cells, pcs_all, pcs, ref_all)
+                for run, out in zip(runs, assigned, strict=True):
+                    run[1:5] = out
             # the restart whose aneuploid/diploid calls agree best with those of the others (the medoid). Agreement
             # is the share of cells with the same call, not the adjusted Rand index: a fit with an inverted baseline
             # (tumour cells diploid, normal cells aneuploid) splits the cells like a correct fit, so its ARI with it
             # is 1
-            calls = np.array([resp[:, 1:].sum(axis=1) > 0.5 for _, resp, *_ in runs])
+            calls = np.array([run[1][:, 1:].sum(axis=1) > 0.5 for run in runs])
             agreement = np.array([[(a == b).mean() for b in calls] for a in calls])
             ari = np.array([[_ari(a, b) for b in calls] for a in calls])
             best = int(np.argmax(agreement.sum(axis=1)))
             log.debug("copy_number: restart %d agrees best with the others\n%s", best, np.round(agreement, 3))
-            em, resp, llr, baseline_method, flat_gap = runs[best]
+            em, resp, llr, ll, types, baseline_method, flat_gap = runs[best]
+            del runs
             spatial = None
             if G is not None:
                 bar.set_postfix_str("neighbour prior")
-                lt, log_prior = em.post_terms
-                resp, spatial = _neighbour_prior(G, cells, resp, lt, log_prior, ref_all, max_neighbour_weight)
+                resp, spatial = _neighbour_prior(
+                    G, cells, resp, em.tau * ll, np.log(em.priors)[types], ref_all, max_neighbour_weight
+                )
         k = resp.shape[1]
         p_an = resp[:, 1:].sum(axis=1)
         clone = np.where(p_an > 0.5, 1 + resp[:, 1:].argmax(axis=1), 0) if k > 1 else np.zeros(n, dtype=np.int64)
@@ -580,8 +585,8 @@ def _fit_clones(data, hmm, pcs, ref_fit, ref_share, n_clusters, rng, min_burden,
 
     `ref_share` is the share of reference cells among all cells (with `ref_fit`, the reference cells of the fitted
     ones), `mlay` the layout of the normal markers (`None` without markers). Returns the expression types, the
-    fitted `_EM`, the posteriors and log likelihood ratios of the fitted cells, the baseline method and the flatness
-    gap. `stage` is called with the name of each step (for the progress bar).
+    fitted `_EM`, the posteriors, log likelihood ratios and log likelihoods (cells x clones) of the fitted cells, the
+    baseline method and the flatness gap. `stage` is called with the name of each step (for the progress bar).
     """
     lay = data.lay
     stage("types")
@@ -623,7 +628,7 @@ def _fit_clones(data, hmm, pcs, ref_fit, ref_share, n_clusters, rng, min_burden,
     stage("EM")
     for pass_ in range(_N_PASSES + 1):
         em.set_baseline(normal)
-        assign, resp, llr = em.run(assign, n_iter if pass_ < _N_PASSES else 1)
+        assign, resp, llr, ll = em.run(assign, n_iter if pass_ < _N_PASSES else 1)
         if pass_ == _N_PASSES:
             break
         k = int(assign.max()) + 1
@@ -651,7 +656,7 @@ def _fit_clones(data, hmm, pcs, ref_fit, ref_share, n_clusters, rng, min_burden,
         assign = _compact(target[assign])
         if not fixed:
             normal = assign == 0
-    return clusters, em, resp, llr, baseline_method, flat_gap
+    return em, resp, llr, ll, baseline_method, flat_gap
 
 
 @contextmanager
@@ -1370,37 +1375,27 @@ class _EM:
         self.model = (share, log_share, phi, use, g, spill_ok)
         return ll
 
-    def assign_all(self, source, cells, pcs_all, pcs_fit, types_fit, ref=None):
-        """Posterior clone probabilities and log likelihood ratios of all `cells` under the fitted model.
+    def types_of(self, pcs_all, pcs_fit, ref):
+        """Expression type of each cell: the nearest centre of the fitted cells' types in principal component space.
 
-        A cell's type is the nearest k-means centre (fitted cells) in principal component space; its likelihood comes
-        from one fused pass over its counts (`assign_loglik`), with the temperature and type priors of the fit.
+        With `ref`, reference cells take the nearest reference type, the other cells the nearest other type.
         """
         n_types = self.n_types
         centres = np.zeros((n_types, pcs_fit.shape[1]))
-        np.add.at(centres, types_fit, pcs_fit)
-        centres /= np.maximum(np.bincount(types_fit, minlength=n_types), 1)[:, None]
+        np.add.at(centres, self.types, pcs_fit)
+        centres /= np.maximum(np.bincount(self.types, minlength=n_types), 1)[:, None]
         types = _nearest(pcs_all, centres).astype(np.int64)
-        if ref is not None:  # reference cells take the nearest reference type, the other cells the nearest other type
+        if ref is not None:
             for mask, kinds in ((ref, self.ref_type), (~ref, ~self.ref_type)):
                 ids = np.flatnonzero(kinds)
                 if mask.any() and len(ids):
                     types[mask] = ids[_nearest(pcs_all[mask], centres[ids])]
-        share = self.model[0]
-        ll = np.empty((len(cells), share.shape[1]))
-        self.spill = np.empty(len(cells))
-        for i0, i1, X, rws in _row_blocks(source, cells):
-            K.assign_loglik(
-                X.data, X.indices, X.indptr, rws, self.data.lay.col_map, self.data.gene_win, types[i0:i1],
-                *self.model, _MAX_SPILL, ll[i0:i1], self.spill[i0:i1], n_kernel_chunks(i1 - i0),
-            )  # fmt: skip
-        return self.posterior(ll, types)
+        return types
 
     def posterior(self, ll, types):
         """Posterior clone probabilities (temperature-scaled likelihoods, type priors) and the unscaled llr."""
         llr = ll[:, 1:].max(axis=1) - ll[:, 0] if ll.shape[1] > 1 else np.zeros(len(ll))
-        self.post_terms = (self.tau * ll, np.log(self.priors)[types])  # for the spatial prior
-        ll = self.post_terms[0] + self.post_terms[1]
+        ll = self.tau * ll + np.log(self.priors)[types]
         resp = np.exp(ll - ll.max(axis=1, keepdims=True))
         return resp / resp.sum(axis=1, keepdims=True), llr
 
@@ -1444,7 +1439,7 @@ class _EM:
         return target
 
     def run(self, assign, n_iter):
-        """EM of the clone assignments; returns the assignments, the posteriors and the llr of the cells."""
+        """EM of the clone assignments; returns the assignments, the posteriors, the llr and the log likelihoods."""
         n = len(assign)
         assign = _compact(assign)
         for it in range(n_iter):
@@ -1499,7 +1494,30 @@ class _EM:
         log.debug("copy_number: likelihood temperature %.4g", self.tau)
         self.final = (mu_whole, pn_whole, st_whole, lr, v)
         resp, llr = self.posterior(ll, self.types)
-        return assign, resp, llr
+        return assign, resp, llr, ll
+
+
+def _assign_all(ems, source, cells, pcs_all, pcs_fit, ref):
+    """Posteriors, llr, log likelihoods and types of all `cells` under each fitted model, in one pass over the counts.
+
+    Each cell's type comes from `_EM.types_of`; its likelihood under each model comes from one fused pass over its
+    counts (`assign_loglik`), with the temperature and type priors of that fit. Sets each model's `spill`.
+    """
+    types = [em.types_of(pcs_all, pcs_fit, ref) for em in ems]
+    ll = [np.empty((len(cells), em.model[0].shape[1])) for em in ems]
+    spill = [np.empty(len(cells)) for _ in ems]
+    lay, gene_win = ems[0].data.lay, ems[0].data.gene_win
+    for i0, i1, X, rws in _row_blocks(source, cells):
+        for em, t, l, sp_ in zip(ems, types, ll, spill, strict=True):
+            K.assign_loglik(
+                X.data, X.indices, X.indptr, rws, lay.col_map, gene_win, t[i0:i1], *em.model, _MAX_SPILL,
+                l[i0:i1], sp_[i0:i1], n_kernel_chunks(i1 - i0),
+            )  # fmt: skip
+    out = []
+    for em, t, l, sp_ in zip(ems, types, ll, spill, strict=True):
+        em.spill = sp_
+        out.append((*em.posterior(l, t), l, t))
+    return out
 
 
 def _dosage_weights(mu, lr, v, pn, strength: float = _DOSAGE_PRIOR) -> np.ndarray:
