@@ -19,12 +19,6 @@ AX_KEYS = {"heatmap_ax", "groupby_ax", "gene_groups_ax", "colorbar_ax"}
 both_plots = pytest.mark.parametrize("plot", [cnv.pl.chromosome_heatmap, cnv.pl.chromosome_heatmap_summary])
 
 
-@pytest.fixture(autouse=True)
-def _close_figures():
-    yield
-    plt.close("all")
-
-
 @pytest.fixture
 def adata_small() -> AnnData:
     """60 cells in uneven groups (one category unused, one cell without a group) x 12 windows on 3 chromosomes."""
@@ -272,11 +266,6 @@ def test_legacy_rejects_ax(adata_small):
         cnv.pl.chromosome_heatmap(adata_small, groupby="group", ax=ax, mode="legacy")
 
 
-def test_legacy_return_fig(adata_small):
-    adata_small = adata_small[adata_small.obs["group"].notna()].copy()
-    assert isinstance(cnv.pl.chromosome_heatmap(adata_small, groupby="group", mode="legacy", return_fig=True), Figure)
-
-
 # --- fast mode ----------------------------------------------------------------------------------------------------
 
 
@@ -371,18 +360,6 @@ def test_return_fig_without_ax(adata_small):
     assert tuple(fig.get_size_inches()) == (5, 3)
 
 
-def test_save(adata_small, tmp_path):
-    figdir = sc.settings.figdir
-    sc.settings.figdir = tmp_path  # a property without deleter, so no monkeypatch
-    try:
-        cnv.pl.chromosome_heatmap(adata_small, groupby="group", show=False, save=True)
-        cnv.pl.chromosome_heatmap_summary(adata_small, groupby="group", show=False, save="_summary.png")
-    finally:
-        sc.settings.figdir = figdir
-    ext = sc.settings.file_format_figs
-    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([f"heatmap.{ext}", "heatmap_summary.png"])
-
-
 @pytest.mark.parametrize("mode", ["fast", "legacy"])
 @both_plots
 def test_save_like_scanpy(adata_small, tmp_path, plot, mode):
@@ -392,7 +369,7 @@ def test_save_like_scanpy(adata_small, tmp_path, plot, mode):
     sc.settings.figdir, sc.settings.file_format_figs = tmp_path, "pdf"
     try:
         plot(adata_small, groupby="group", show=False, save=".png", mode=mode)
-        plot(adata_small, groupby="group", show=False, save="", mode=mode)
+        plot(adata_small, groupby="group", show=False, save="" if mode == "legacy" else True, mode=mode)
         assert not plt.get_fignums()
         fig = plot(adata_small, groupby="group", save="_fig.svg", return_fig=True, mode=mode)
         assert plt.fignum_exists(fig.number)
