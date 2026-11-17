@@ -226,7 +226,7 @@ def test_copy_number_spatial_info_with_one_clone():
     adata.obsp["g"] = knn_graph(np.random.default_rng(0).random((adata.n_obs, 2)), 6)
     obs, _, uns, _ = cnv.tl.copy_number(adata, n_jobs=2, inplace=False, connectivity_key="g", force_calls=True)
     assert len(uns["clones"]) == 1
-    assert uns["spatial"] == {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}
+    assert uns["spatial"] == {"neighbor_weight": 0.0, "sweeps": 0, "converged": True}
 
 
 @pytest.mark.parametrize("show", [False, True])
@@ -595,8 +595,8 @@ def test_copy_number_reference_arguments():
         ({"max_fit_cells": 1}, "max_fit_cells"),
         ({"n_restarts": 0}, "n_restarts"),
         ({"min_detection": 1.5}, "min_detection"),
-        ({"max_neighbour_weight": -0.1}, "max_neighbour_weight"),
-        ({"max_neighbour_weight": 1.0}, "max_neighbour_weight"),
+        ({"max_neighbor_weight": -0.1}, "max_neighbor_weight"),
+        ({"max_neighbor_weight": 1.0}, "max_neighbor_weight"),
     ],
 )
 def test_copy_number_argument_checks(kw, match):
@@ -753,8 +753,8 @@ def _tissue(seed, depth=100, n=2000, n_chrom=6, genes=400):
 
 
 @pytest.mark.parametrize("seed", [0, 1])
-def test_copy_number_neighbour_prior_tissue(seed):
-    """With reference cells, the neighbour prior raises accuracy (also at the tumour edge), calls no reference cell,
+def test_copy_number_neighbor_prior_tissue(seed):
+    """With reference cells, the neighbor prior raises accuracy (also at the tumour edge), calls no reference cell,
     lowers no reference cell's probability of being diploid, and is not overconfident."""
     adata, tumour, ref, edge = _tissue(seed)
     kw = {
@@ -783,12 +783,12 @@ def test_copy_number_neighbour_prior_tissue(seed):
     np.testing.assert_allclose(spatial[0]["copy_number_llr"], plain[0]["copy_number_llr"])
     assert ((s > 0.5) == (spatial[0]["copy_number"] == "aneuploid")).all()
     info = spatial[2]["spatial"]
-    assert info["converged"] and 0 < info["neighbour_weight"] <= 0.8
+    assert info["converged"] and 0 < info["neighbor_weight"] <= 0.8
 
 
 @pytest.mark.parametrize("seed", [0, 1])
-def test_copy_number_neighbour_prior_without_reference(seed):
-    """Without a reference the neighbour prior uses the whole graph and still improves the calls."""
+def test_copy_number_neighbor_prior_without_reference(seed):
+    """Without a reference the neighbor prior uses the whole graph and still improves the calls."""
     adata, tumour, *_ = _tissue(seed)
     kw = {"min_genes": 5, "n_jobs": 2, "inplace": False, "force_calls": True}
     plain = cnv.tl.copy_number(adata, **kw)[0]
@@ -802,7 +802,7 @@ def test_copy_number_without_graph_edges_is_unchanged():
     adata = _simulate(n_tumour=300, n_normal=200, depth=300, seed=3)
     adata.obsp["empty_connectivities"] = sp.csr_matrix((adata.n_obs, adata.n_obs))
     zeros = knn_graph(np.random.default_rng(0).random((adata.n_obs, 2)), 10)
-    zeros.data[:] = 0.0  # stored zeros (as left by zeroing cross-type entries) are not neighbours
+    zeros.data[:] = 0.0  # stored zeros (as left by zeroing cross-type entries) are not neighbors
     adata.obsp["zero_connectivities"] = zeros + sp.eye(adata.n_obs, format="csr")  # nor are self-loops
     kw = {"min_genes": 5, "n_jobs": 2, "inplace": False}
     plain = cnv.tl.copy_number(adata, **kw)
@@ -810,15 +810,15 @@ def test_copy_number_without_graph_edges_is_unchanged():
         same = cnv.tl.copy_number(adata, connectivity_key=key, **kw)
         pd.testing.assert_frame_equal(plain[0], same[0], check_exact=True)
         np.testing.assert_array_equal(plain[1], same[1])
-        assert same[2]["spatial"] == {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}
+        assert same[2]["spatial"] == {"neighbor_weight": 0.0, "sweeps": 0, "converged": True}
         assert same[2]["params"]["connectivity_key"] == key
     assert "spatial" not in plain[2]
     with pytest.raises(KeyError, match="not found"):
         cnv.tl.copy_number(adata, connectivity_key="missing")
 
 
-def test_neighbour_prior_fixed_point_and_weight():
-    """The sweeps reach the fixed point q_i ~ L_i ((1 - lam) pi_i + lam m_i); the weight is about 0 when neighbours do
+def test_neighbor_prior_fixed_point_and_weight():
+    """The sweeps reach the fixed point q_i ~ L_i ((1 - lam) pi_i + lam m_i); the weight is about 0 when neighbors do
     not predict a cell's clone and large when they do; reference cells only lose aneuploid probability."""
     rng = np.random.default_rng(0)
     n, k = 3000, 3
@@ -831,46 +831,46 @@ def test_neighbour_prior_fixed_point_and_weight():
         lt[np.arange(n), clone] += 1.0  # weak evidence for the true clone
         resp = np.exp(lt + log_prior)
         resp /= resp.sum(axis=1, keepdims=True)
-        return resp, lt, *M._neighbour_prior(G, np.arange(n), resp, lt, log_prior, ref, 0.95)
+        return resp, lt, *M._neighbor_prior(G, np.arange(n), resp, lt, log_prior, ref, 0.95)
 
     coherent = np.minimum((xy[:, 0] * k).astype(int), k - 1)  # three stripes
     resp, lt, q, info = run(coherent)
-    assert info["converged"] and info["neighbour_weight"] > 0.5
-    lam = info["neighbour_weight"]
+    assert info["converged"] and info["neighbor_weight"] > 0.5
+    lam = info["neighbor_weight"]
     m = np.asarray(G @ q) / np.asarray(G.sum(axis=1))
     fp = np.exp(lt - lt.max(axis=1, keepdims=True)) * ((1 - lam) / k + lam * m)
     np.testing.assert_allclose(q, fp / fp.sum(axis=1, keepdims=True), atol=1e-4)
     assert (q.argmax(axis=1) == coherent).mean() > (resp.argmax(axis=1) == coherent).mean() + 0.2
     _, _, _, info = run(rng.integers(0, k, n))  # clones placed at random
-    assert info["neighbour_weight"] < 0.1
+    assert info["neighbor_weight"] < 0.1
     ref = rng.random(n) < 0.3
     resp, _, q, _ = run(coherent, ref)
     assert (q[ref, 1:].sum(axis=1) <= resp[ref, 1:].sum(axis=1) + 1e-12).all()
-    # a reference cell whose neighbours are all non-reference has no edges left: it keeps its per-cell posterior
+    # a reference cell whose neighbors are all non-reference has no edges left: it keeps its per-cell posterior
     G = G.tolil()
     for i in np.flatnonzero(ref)[:20]:
         G[i, :], G[:, i] = 0, 0
         G[i, np.flatnonzero(~ref)[:5]] = G[np.flatnonzero(~ref)[:5], i] = 1
     G = G.tocsr()
     resp, _, q, info = run(coherent, ref)
-    assert info["neighbour_weight"] > 0
+    assert info["neighbor_weight"] > 0
     np.testing.assert_array_equal(q[np.flatnonzero(ref)[:20]], resp[np.flatnonzero(ref)[:20]])
 
 
 @pytest.mark.parametrize("cap", [0.0, 0.3, 0.6])
-def test_copy_number_max_neighbour_weight(cap):
-    """`max_neighbour_weight=0` gives the per-cell results; otherwise the learnt weight stays at or below the cap."""
+def test_copy_number_max_neighbor_weight(cap):
+    """`max_neighbor_weight=0` gives the per-cell results; otherwise the learnt weight stays at or below the cap."""
     adata, *_ = _tissue(0)
     kw = {"min_genes": 5, "n_jobs": 2, "inplace": False, "force_calls": True, "reference_key": "type"}
     kw["reference_cat"] = "immune"
-    spatial = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", max_neighbour_weight=cap, **kw)
+    spatial = cnv.tl.copy_number(adata, connectivity_key="spatial_connectivities", max_neighbor_weight=cap, **kw)
     info = spatial[2]["spatial"]
-    assert spatial[2]["params"]["max_neighbour_weight"] == cap
+    assert spatial[2]["params"]["max_neighbor_weight"] == cap
     if cap == 0:
         plain = cnv.tl.copy_number(adata, **kw)
         pd.testing.assert_frame_equal(plain[0], spatial[0], check_exact=True)
         np.testing.assert_array_equal(plain[1], spatial[1])
-        assert info == {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}
+        assert info == {"neighbor_weight": 0.0, "sweeps": 0, "converged": True}
     else:
-        assert 0 < info["neighbour_weight"] <= cap
+        assert 0 < info["neighbor_weight"] <= cap
         assert info["converged"]

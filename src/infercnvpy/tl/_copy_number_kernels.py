@@ -500,12 +500,12 @@ def mix_rows(resp, prof, rows, cols, out):
 
 
 @njit_parallel
-def neighbour_prior_sweep(indptr, indices, w, deg, lik, base, lam, fixed, q, out, change):
+def neighbor_prior_sweep(indptr, indices, w, deg, lik, base, lam, fixed, q, out, change):
     """One damped synchronous update of the spatial posteriors: `out_i = (q_i + p_i) / 2`.
 
-    `p_i ~ lik_i ((1 - lam) base_i + lam m_i)`, where `m_i` is the mean of the posteriors `q_j` of i's neighbours in
+    `p_i ~ lik_i ((1 - lam) base_i + lam m_i)`, where `m_i` is the mean of the posteriors `q_j` of i's neighbors in
     the CSR graph (`indptr`, `indices`, weights `w`, no diagonal, row sums `deg`), weighted by `w`. The damping keeps
-    the fixed point and stops neighbours from oscillating. Rows with `fixed` keep `q_i`. `change[i]` receives the
+    the fixed point and stops neighbors from oscillating. Rows with `fixed` keep `q_i`. `change[i]` receives the
     largest change of row i.
     """
     n, k = q.shape

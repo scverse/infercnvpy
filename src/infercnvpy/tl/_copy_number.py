@@ -125,7 +125,7 @@ def copy_number(
     calculate_gene_values: bool = False,
     max_fit_cells: int | None = None,
     connectivity_key: str | None = None,
-    max_neighbour_weight: float = 0.8,
+    max_neighbor_weight: float = 0.8,
     force_calls: bool = False,
     bin_size: int = 1_000_000,
     chunksize: int = 5000,
@@ -238,27 +238,27 @@ def copy_number(
         large datasets; results can differ from the default, which fits on all cells. Use tens of thousands of cells: with a few thousand or fewer, the
         diploid baseline and the clones can change from those of the full fit.
     connectivity_key
-        Let each cell's spatial neighbours inform its clone, with the cells x cells graph `adata.obsp[connectivity_key]`,
+        Let each cell's spatial neighbors inform its clone, with the cells x cells graph `adata.obsp[connectivity_key]`,
         e.g. `"spatial_connectivities"` from :func:`squidpy.gr.spatial_neighbors_knn`. Any graph with non-negative
         weights works, and entries set to 0 are not edges. The prior of a cell over the clones becomes a mixture of its
-        type's prior and the weighted mean of its neighbours' posteriors, the cell itself left out. The mixing weight is
-        estimated from the data by maximising the likelihood of each cell given its neighbours, and then the posteriors
+        type's prior and the weighted mean of its neighbors' posteriors, the cell itself left out. The mixing weight is
+        estimated from the data by maximising the likelihood of each cell given its neighbors, and then the posteriors
         are updated until they no longer change. A cell with strong evidence of its own keeps its call, and a cell with
-        little evidence follows its neighbourhood. A cell without neighbours keeps its per-cell posterior. On imaging
-        data, where single cells hold few counts and neighbours usually share their clone, this lowers the errors
-        inside clones. About 10 neighbours, i.e. `squidpy.gr.spatial_neighbors_knn(adata, n_neighs=10)`, is a good
+        little evidence follows its neighborhood. A cell without neighbors keeps its per-cell posterior. On imaging
+        data, where single cells hold few counts and neighbors usually share their clone, this lowers the errors
+        inside clones. About 10 neighbors, i.e. `squidpy.gr.spatial_neighbors_knn(adata, n_neighs=10)`, is a good
         start.
 
         With `reference_key`, edges between reference and other cells are dropped: a reference cell says nothing about
         the copy number of a tumour cell next to it, and the other way round. Reference cells take the diploid clone
-        as their neighbours' state, so their probability of being aneuploid can only go down. Without a reference, use
+        as their neighbors' state, so their probability of being aneuploid can only go down. Without a reference, use
         the same split with your own annotation by setting the graph's entries between known normal cells and the
         other cells to 0 (see :func:`~infercnvpy.tl.smooth_cnv`). `copy_number_llr` stays the cell's own log
         likelihood ratio; `copy_number_score`, the labels, clones and profiles use the spatial posteriors. With
         several `n_restarts`, the fit is chosen without the spatial prior, and the prior then applies to that fit
         only. Default `None`: no spatial information.
-    max_neighbour_weight
-        Largest weight that a cell's neighbours get in its prior when `connectivity_key` is given; the weight itself is
+    max_neighbor_weight
+        Largest weight that a cell's neighbors get in its prior when `connectivity_key` is given; the weight itself is
         estimated from the data, up to this value. A lower value lets a cell's own data count more, which reduces the
         spread of calls into normal cells next to a tumour; a higher value smooths more, which helps in shallow data.
         Between 0 and 1 (not included); 0 turns the spatial prior off, so the results are those of single cells.
@@ -291,7 +291,7 @@ def copy_number(
     n_jobs
         Number of threads.
     show_progress
-        Show a progress bar over the restarts, with the current step (PCA, types, EM, neighbour prior). tqdm's own
+        Show a progress bar over the restarts, with the current step (PCA, types, EM, neighbor prior). tqdm's own
         switch, the environment variable ``TQDM_DISABLE=1``, turns it off too if it is set before tqdm is imported.
 
     Returns
@@ -359,8 +359,8 @@ def copy_number(
         `chosen` (the index of the fit that `copy_number` returns), `agreement` (the share of cells with the same
         aneuploid/diploid call in every pair of fits) and `n_aneuploid` (the number of aneuploid cells in each fit).
     `adata.uns["copy_number"]["spatial"]` : :class:`dict`
-        Only with `connectivity_key`: `neighbour_weight` (the estimated weight of the neighbours in each cell's prior,
-        0 to `max_neighbour_weight`), `sweeps` (number of updates of the posteriors) and `converged`.
+        Only with `connectivity_key`: `neighbor_weight` (the estimated weight of the neighbors in each cell's prior,
+        0 to `max_neighbor_weight`), `sweeps` (number of updates of the posteriors) and `converged`.
     `adata.uns["copy_number"]["params"]` : :class:`dict`
         Parameters of this call.
 
@@ -369,7 +369,7 @@ def copy_number(
 
     Notes
     -----
-    The default `max_neighbour_weight=0.8` is a compromise. Lower values call fewer normal cells next to a tumour
+    The default `max_neighbor_weight=0.8` is a compromise. Lower values call fewer normal cells next to a tumour
     aneuploid, and higher values find more cells at the edge of a clone in shallow data.
     """
     if not adata.var_names.is_unique:
@@ -383,8 +383,8 @@ def copy_number(
         chunksize=chunksize, n_clusters=n_clusters, max_fit_cells=max_fit_cells, min_detection=min_detection,
         segment_length=segment_length, n_restarts=n_restarts,
     )  # fmt: skip
-    if not 0 <= max_neighbour_weight < 1:
-        raise ValueError(f"`max_neighbour_weight` must be at least 0 and below 1, got {max_neighbour_weight}.")
+    if not 0 <= max_neighbor_weight < 1:
+        raise ValueError(f"`max_neighbor_weight` must be at least 0 and below 1, got {max_neighbor_weight}.")
     is_ref = _reference_cells(adata, reference_key, reference_cat)
     G = None if connectivity_key is None else _graph(adata, connectivity_key)
     if isinstance(normal_markers, Mapping):  # lists, so that the parameters can be written to h5ad/zarr
@@ -394,7 +394,7 @@ def copy_number(
         exclude_chromosomes=exclude_chromosomes, exclude_genes=exclude_genes, min_genes=min_genes,
         min_detection=min_detection, window_size=window_size, n_clusters=n_clusters, segment_length=segment_length,
         min_burden=min_burden, normal_markers=normal_markers, n_iter=n_iter, max_fit_cells=max_fit_cells,
-        connectivity_key=connectivity_key, max_neighbour_weight=max_neighbour_weight, force_calls=force_calls,
+        connectivity_key=connectivity_key, max_neighbor_weight=max_neighbor_weight, force_calls=force_calls,
         bin_size=bin_size, n_restarts=n_restarts, random_state=random_state,
     )  # fmt: skip
     rng = np.random.default_rng(random_state)
@@ -488,9 +488,9 @@ def copy_number(
             del runs
             spatial = None
             if G is not None:
-                bar.set_postfix_str("neighbour prior")
-                resp, spatial = _neighbour_prior(
-                    G, cells, resp, em.tau * ll, np.log(em.priors)[types], ref_all, max_neighbour_weight
+                bar.set_postfix_str("neighbor prior")
+                resp, spatial = _neighbor_prior(
+                    G, cells, resp, em.tau * ll, np.log(em.priors)[types], ref_all, max_neighbor_weight
                 )
         k = resp.shape[1]
         p_an = resp[:, 1:].sum(axis=1)
@@ -740,19 +740,19 @@ def _reference_cells(adata, reference_key, reference_cat) -> np.ndarray | None:
     return np.isin(values, _categories(reference_cat))
 
 
-def _neighbour_prior(G, cells, resp, lt, log_prior, ref, max_weight):
-    """Posteriors with a spatial prior: each cell's prior mixes its type's prior with its neighbours' posteriors.
+def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
+    """Posteriors with a spatial prior: each cell's prior mixes its type's prior with its neighbors' posteriors.
 
     For cell i with tempered likelihoods `L_i(c) = exp(lt_i(c))` and type prior `pi_i(c)`, the posterior is
-    `q_i(c) ~ L_i(c) * ((1 - lam) * pi_i(c) + lam * m_i(c))`, where `m_i` is the weighted mean of the neighbours'
+    `q_i(c) ~ L_i(c) * ((1 - lam) * pi_i(c) + lam * m_i(c))`, where `m_i` is the weighted mean of the neighbors'
     posteriors `q_j` (i itself excluded). `lam` maximises the pseudo-likelihood `sum_i log sum_c L_i(c) * prior_i(c)`
     with `m_i` from the per-cell posteriors (concave in `lam`); then damped synchronous updates run to a fixed point.
     With `ref`, edges between reference and other cells are dropped, and reference cells use the diploid clone as
-    `m_i`. `lam` is at most `max_weight`; with 0 or without neighbours, cells keep their per-cell posterior `resp`.
+    `m_i`. `lam` is at most `max_weight`; with 0 or without neighbors, cells keep their per-cell posterior `resp`.
     Returns the posteriors and a summary dict.
     """
     if max_weight <= 0 or resp.shape[1] < 2:
-        return resp, {"neighbour_weight": 0.0, "sweeps": 0, "converged": True}
+        return resp, {"neighbor_weight": 0.0, "sweeps": 0, "converged": True}
     n, k = lt.shape
     G = G[cells][:, cells].tocsr()
     G.setdiag(0)
@@ -766,16 +766,16 @@ def _neighbour_prior(G, cells, resp, lt, log_prior, ref, max_weight):
     q = resp.copy()  # = lik * base, normalised
     deg = np.asarray(G.sum(axis=1)).ravel()
     fixed = deg <= 0 if ref is None else (deg <= 0) | ref
-    lam = _neighbour_weight(G, deg, lik, base, q, ~fixed, max_weight)
+    lam = _neighbor_weight(G, deg, lik, base, q, ~fixed, max_weight)
     push = np.zeros(n, dtype=bool) if ref is None or lam == 0 else ref & (deg > 0)
-    if push.any():  # reference cells with neighbours are declared diploid: their neighbours' state is the diploid clone
+    if push.any():  # reference cells with neighbors are declared diploid: their neighbors' state is the diploid clone
         pr = (1.0 - lam) * base[push]
         pr[:, 0] += lam
         q[push] = lik[push] * pr / (lik[push] * pr).sum(axis=1, keepdims=True)
     out, change = np.empty_like(q), np.empty(n)
     converged, sweep = lam == 0.0, 0
     while not converged and sweep < _NP_SWEEPS:
-        K.neighbour_prior_sweep(
+        K.neighbor_prior_sweep(
             G.indptr, G.indices, G.data.astype(np.float64), deg, lik, base, lam, fixed, q, out, change
         )
         q, out = out, q
@@ -783,12 +783,12 @@ def _neighbour_prior(G, cells, resp, lt, log_prior, ref, max_weight):
         converged = change.max() < _NP_TOL
     if not converged:
         log.warning("copy_number: the spatial posteriors did not converge in %d sweeps", sweep)
-    log.debug("copy_number: neighbour weight %.3f, %d sweeps", lam, sweep)
-    return q, {"neighbour_weight": float(lam), "sweeps": sweep, "converged": bool(converged)}
+    log.debug("copy_number: neighbor weight %.3f, %d sweeps", lam, sweep)
+    return q, {"neighbor_weight": float(lam), "sweeps": sweep, "converged": bool(converged)}
 
 
-def _neighbour_weight(G, deg, lik, base, q, free, max_weight) -> float:
-    """Weight `lam` of the neighbours in the prior that maximises `sum_i log sum_c L_i(c) ((1-lam) pi_i + lam m_i)`.
+def _neighbor_weight(G, deg, lik, base, q, free, max_weight) -> float:
+    """Weight `lam` of the neighbors in the prior that maximises `sum_i log sum_c L_i(c) ((1-lam) pi_i + lam m_i)`.
 
     The objective is a sum of logs of functions linear in `lam`, so it is concave; its derivative falls
     monotonically, and bisection finds the root in [0, `max_weight`].
@@ -1060,7 +1060,7 @@ def _expression_deviation(resid: np.ndarray, pois: np.ndarray) -> np.ndarray:
 
 
 def _robust_var(x: np.ndarray) -> np.ndarray:
-    """Noise variance along each profile (rows), from the median absolute deviation of the differences of neighbours."""
+    """Noise variance along each profile (rows), from the median absolute deviation of the differences of neighbors."""
     d = np.diff(x, axis=-1)
     return (1.4826 * np.median(np.abs(d - np.median(d, axis=-1, keepdims=True)), axis=-1)) ** 2 / 2
 
