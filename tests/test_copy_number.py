@@ -169,6 +169,37 @@ def test_kmeans_does_not_depend_on_threads():
     np.testing.assert_array_equal(one, two)
 
 
+def test_ari():
+    a = np.array([0, 0, 0, 1, 1, 1])
+    assert M._ari(a, a) == 1.0 and M._ari(a, 1 - a) == 1.0  # names don't matter
+    assert M._ari(a, np.zeros(6)) == 0.0 and M._ari(np.zeros(6), np.zeros(6)) == 1.0
+    # sklearn.metrics.adjusted_rand_score([0, 0, 1, 1], [0, 0, 1, 2]) = 0.5714285714285715
+    assert M._ari(np.array([0, 0, 1, 1]), np.array([0, 0, 1, 2])) == pytest.approx(4 / 7)
+    rng = np.random.default_rng(0)
+    assert abs(M._ari(rng.integers(0, 2, 10_000), rng.integers(0, 2, 10_000))) < 0.01  # chance
+
+
+def test_copy_number_restarts():
+    """The returned fit is the medoid of the restarts; restart r is the same fit for any `n_restarts` > r."""
+    adata = _simulate()
+    obs, _, uns, _ = cnv.tl.copy_number(adata, n_restarts=3, n_jobs=2, inplace=False)
+    info = uns["restarts"]
+    agree, chosen = info["agreement"], info["chosen"]
+    for m in (agree, info["ari"]):
+        assert m.shape == (3, 3) and np.allclose(m, m.T) and np.allclose(np.diag(m), 1.0)
+    assert chosen == np.argmax(agree.sum(axis=1))
+    an = (obs["copy_number"] == "aneuploid").to_numpy()
+    assert an.sum() == info["n_aneuploid"][chosen]
+    stability = obs["copy_number_stability"].to_numpy()
+    assert set(np.round(stability * 3).astype(int)) <= {1, 2, 3}  # the chosen fit always agrees with itself
+    np.testing.assert_allclose(stability.mean(), agree[chosen].mean())
+    assert _accuracy(adata, obs) >= 0.98
+    single = cnv.tl.copy_number(adata, n_restarts=1, n_jobs=2, inplace=False)
+    assert (single[0]["copy_number"] == "aneuploid").sum() == info["n_aneuploid"][0]
+    assert (single[0]["copy_number_stability"] == 1.0).all()
+    np.testing.assert_array_equal(single[2]["restarts"]["ari"], [[1.0]])
+
+
 @pytest.mark.parametrize("n", [300, 3000, 1e6])
 def test_spillover_is_the_likelihood_maximum(n):
     """Large `g / a` (a tumour-specific window) made the Newton steps stop near 0."""
@@ -214,7 +245,7 @@ def test_copy_number_synthetic(kw):
 
 
 _DETECTION_BIAS = pytest.mark.xfail(
-    strict=False,  # the first case depends on the k-means seed: 3 of seeds 0 to 4 pass
+    strict=False,  # the first case depends on the seed: some restarts invert the baseline, and the majority wins
     reason="open: where a tumour is the majority at low depth, its losses fall below the detection filter more often "
     "than its gains and the tumour looks flattest. Scoring genes detected per expression cluster fixed this but "
     "inverted real panel cuts and droplet lines (cluster-specific genes enter the flatness), so it was not kept.",
@@ -296,7 +327,7 @@ def test_em_runs_after_baseline_and_uses_its_dosage(monkeypatch):
             return _orig(self, *args, **kw)
 
         monkeypatch.setattr(M._EM, name, spy)
-    uns = cnv.tl.copy_number(_simulate(), n_jobs=2, inplace=False)[2]
+    uns = cnv.tl.copy_number(_simulate(), n_restarts=1, n_jobs=2, inplace=False)[2]  # the calls of one fit
     names = [c for c, _ in calls if c != "loglik"]
     assert names[0] == "set_baseline" and all(
         a == "set_baseline" for a, b in zip(names, names[1:], strict=False) if b == "run"
@@ -428,6 +459,7 @@ def test_copy_number_reference_arguments():
         ({"chunksize": 0}, "chunksize"),
         ({"n_clusters": 0}, "n_clusters"),
         ({"max_fit_cells": 1}, "max_fit_cells"),
+        ({"n_restarts": 0}, "n_restarts"),
         ({"min_detection": 1.5}, "min_detection"),
         ({"max_neighbour_weight": -0.1}, "max_neighbour_weight"),
         ({"max_neighbour_weight": 1.0}, "max_neighbour_weight"),
@@ -528,14 +560,11 @@ def test_copy_number_undetermined_on_too_little_information(kw, reason, caplog):
         obs, X, uns, _ = cnv.tl.copy_number(adata, min_genes=5, min_detection=0.01, n_jobs=2, inplace=False)
     assert "undetermined" in caplog.text and "tl.infercnv" in caplog.text
     assert (obs["copy_number"] == "undetermined").all() and (obs["copy_number_clone"] == "undetermined").all()
-    assert obs[["copy_number_score", "copy_number_llr", "copy_number_spillover"]].isna().all().all()
+    assert obs[[f"copy_number_{c}" for c in ("score", "llr", "spillover", "stability")]].isna().all().all()
     assert (X == 0).all() and X.shape == (adata.n_obs, len(uns["bins"]))
     info = uns["undetermined"]
     assert info["n_genes"] < M._MIN_PANEL_GENES if reason == "genes" else info["median_counts"] < M._MIN_MEDIAN_COUNTS
-    # at 60 counts per cell, about one k-means seed in six calls no cell aneuploid (before full-data k-means too)
-    forced = cnv.tl.copy_number(
-        adata, min_genes=5, min_detection=0.01, n_jobs=2, inplace=False, force_calls=True, random_state=1
-    )[0]
+    forced = cnv.tl.copy_number(adata, min_genes=5, min_detection=0.01, n_jobs=2, inplace=False, force_calls=True)[0]
     assert (forced["copy_number"] == "aneuploid").any() and (forced["copy_number"] == "diploid").any()
 
 

@@ -125,6 +125,7 @@ def copy_number(
     force_calls: bool = False,
     bin_size: int = 1_000_000,
     chunksize: int = 5000,
+    n_restarts: int = 5,
     random_state: int = 0,
     key_added: str = "copy_number",
     inplace: bool = True,
@@ -156,7 +157,9 @@ def copy_number(
        without a smooth profile (amplitude below 0.1) merge into the diploid clone, which re-defines the baseline;
     7. learn per-gene dosage weights from the clone contrasts and per-type clone priors from a non-negative fit of
        each type's profile on the clone profiles; the per-cell posterior uses these priors and log likelihoods scaled
-       by a temperature calibrated between the two halves of the windows.
+       by a temperature calibrated between the two halves of the windows;
+    8. repeat steps 2 to 7 `n_restarts` times, each with its own k-means seed, and keep the fit whose
+       aneuploid/diploid calls agree best with those of the other fits.
 
     The method is made for UMI counts from droplet (10x) and imaging platforms. On full-length plate data
     (Smart-seq2) its profiles are poor.
@@ -251,8 +254,9 @@ def copy_number(
         as their neighbours' state, so their probability of being aneuploid can only go down. Without a reference, use
         the same split with your own annotation by setting the graph's entries between known normal cells and the
         other cells to 0 (see :func:`~infercnvpy.tl.smooth_cnv`). `copy_number_llr` stays the cell's own log
-        likelihood ratio; `copy_number_score`, the labels, clones and profiles use the spatial posteriors.
-        Default `None`: no spatial information.
+        likelihood ratio; `copy_number_score`, the labels, clones and profiles use the spatial posteriors. With
+        several `n_restarts`, the fit is chosen without the spatial prior, and the prior then applies to that fit
+        only. Default `None`: no spatial information.
     max_neighbour_weight
         Largest weight that a cell's neighbours get in its prior when `connectivity_key` is given; the weight itself is
         estimated from the data, up to this value. A lower value lets a cell's own data count more, which reduces the
@@ -272,8 +276,14 @@ def copy_number(
         Size of the genomic bins of the output, in bases.
     chunksize
         Number of cells processed at a time.
+    n_restarts
+        Number of fits, each with its own k-means seed. The expression types change with the seed, and the clones
+        and calls can change with them. Of the fits, `copy_number` keeps the one whose aneuploid/diploid calls agree
+        best with those of the other fits (the highest mean share of cells with the same call), so all of its outputs,
+        i.e. labels, clones, profiles and segments, come from that one fit. `copy_number_stability` holds the share of the fits
+        that agree with each cell's label. The run time grows about linearly with `n_restarts`; 1 fits once.
     random_state
-        Seed of the k-means starts (and of the sample of `max_fit_cells`).
+        Seed of the k-means starts of all fits (and of the sample of `max_fit_cells`).
     key_added
         Name of the results in `adata.obs`, `adata.obsm` and `adata.uns`.
     inplace
@@ -305,6 +315,10 @@ def copy_number(
         with its own type's diploid expression (0 to 1). High values in normal cell types point to segmentation merges
         or doublets with tumour cells; for cells of normal types (marker-rich types, or reference types), up to 0.5 of
         this mixture is part of the diploid expectation, so that spillover alone does not make them aneuploid.
+    `adata.obs["copy_number_stability"]` : :class:`float`
+        Share of the `n_restarts` fits whose call for the cell (aneuploid or diploid, without the spatial prior)
+        equals its label. 1 means that every fit makes the same call, and values near 0.5 mark cells whose call
+        depends on the k-means seed.
     `adata.obsm["X_copy_number"]` : :class:`numpy.ndarray`
         Copy number log ratios (natural log, float32), cells x genomic bins: the posterior mixture of the clones'
         segment means, a continuous score. Cells that are `"not.defined"` or `"undetermined"` have 0 (no copy number
@@ -338,6 +352,10 @@ def copy_number(
         a warning says that the baseline is uncertain.
     `adata.uns["copy_number"]["temperature"]` : :class:`float`
         Scale applied to the log likelihoods for the posterior.
+    `adata.uns["copy_number"]["restarts"]` : :class:`dict`
+        `chosen` (the index of the fit that `copy_number` returns), `agreement` (the share of cells with the same
+        aneuploid/diploid call in every pair of fits), `ari` (the adjusted Rand index of those calls, which doesn't
+        tell a fit from its inverse) and `n_aneuploid` (the number of aneuploid cells in each fit).
     `adata.uns["copy_number"]["spatial"]` : :class:`dict`
         Only with `connectivity_key`: `neighbour_weight` (the estimated weight of the neighbours in each cell's prior,
         0 to `max_neighbour_weight`), `sweeps` (number of updates of the posteriors) and `converged`.
@@ -363,7 +381,7 @@ def copy_number(
     _check_args(
         window_size=window_size, min_genes=min_genes, n_iter=n_iter, bin_size=bin_size,
         chunksize=chunksize, n_clusters=n_clusters, max_fit_cells=max_fit_cells, min_detection=min_detection,
-        segment_length=segment_length,
+        segment_length=segment_length, n_restarts=n_restarts,
     )  # fmt: skip
     if not 0 <= max_neighbour_weight < 1:
         raise ValueError(f"`max_neighbour_weight` must be at least 0 and below 1, got {max_neighbour_weight}.")
@@ -377,7 +395,7 @@ def copy_number(
         min_detection=min_detection, window_size=window_size, n_clusters=n_clusters, segment_length=segment_length,
         min_burden=min_burden, normal_markers=normal_markers, n_iter=n_iter, max_fit_cells=max_fit_cells,
         connectivity_key=connectivity_key, max_neighbour_weight=max_neighbour_weight, force_calls=force_calls,
-        bin_size=bin_size, random_state=random_state,
+        bin_size=bin_size, n_restarts=n_restarts, random_state=random_state,
     )  # fmt: skip
     rng = np.random.default_rng(random_state)
     expr = _as_matrix(adata.X if layer is None else adata.layers[layer], lazy=True)
@@ -427,89 +445,41 @@ def copy_number(
             )  # fmt: skip
         hmm = _HMM(lay, segment_length)
 
-        # expression clusters and their pooled profiles
+        # expression clusters: PCA once; k-means and everything after it once per restart
         n_clusters = n_clusters or int(np.clip(n_fit // 50, 8, 40))
         pcs = data.expression_pcs()
         ref_fit = None if is_ref is None else is_ref[cells[fit]]
+        ref_all = None if is_ref is None else is_ref[cells]
         if ref_fit is None:
-            clusters = _kmeans(pcs, min(n_clusters, n_fit), rng)
-        else:
-            clusters, ref_type = _kmeans_split(pcs, n_clusters, rng, ref_fit)
-        Yc, Sc = data.pooled(clusters)
-        gene_var = _gene_variability(Yc, Sc, lay)
-        burden = _pairwise_burden(hmm, Yc, Sc, gene_var, lay)
-        groups = _groups(burden, min_burden)
-
-        gcell = groups[clusters]
-        n_groups = int(groups.max()) + 1
-        if ref_fit is not None:
-            normal = ref_fit
-            baseline_method, flat_gap = "reference", np.nan
-        else:
             log.info(
                 "copy_number: no reference cells, so the diploid baseline comes from the sample itself. Where known "
                 "normal cells are annotated, give them as `reference_key` / `reference_cat` for a reliable baseline."
             )
-            is_marker = np.asarray(adata.var_names.isin(_marker_list(normal_markers)))
-            marker, total = _marker_counts(data, clusters, Yc, var, candidates, is_marker)
-            normal, baseline_method, flat_gap = _seed(Yc, marker, total, groups, gcell, lay)
-
-        em = _EM(data, hmm, gene_var, min_burden, clusters, Yc, Sc)
-        if ref_fit is not None:
-            # reference types are normal types with a diploid prior, and reference cells stay in the diploid clone
-            # during the fit: with several reference cell types, a reference type whose smooth deviation from the
-            # pooled reference resembles a clone's profile would otherwise join that clone at depth
-            em.normal_type = em.ref_type = ref_type
-            em.pinned = ref_fit
-        elif normal_markers is not None:
-            em.normal_type = _marker_types(Yc, marker / total, lay)
-            log.debug("copy_number: marker-rich expression types %s", np.flatnonzero(em.normal_type))
-        frac = np.bincount(gcell, weights=normal, minlength=n_groups) / np.bincount(gcell, minlength=n_groups)
-        lut = np.where(frac > 0.5, 0, 1 + np.arange(n_groups))
-        assign = np.where(normal, 0, lut[gcell])
-        fixed = is_ref is not None
-        reseeded = "markers" in baseline_method  # marker-rich groups outweigh flatness: no restart
-        # passes: after each, a clearly flatter clone becomes diploid and the passes restart from it, or clones without
-        # a smooth profile merge into the diploid clone; a last single-iteration pass follows the last change
-        for pass_ in range(_N_PASSES + 1):
-            em.set_baseline(normal)
-            assign, resp, llr = em.run(assign, n_iter if pass_ < _N_PASSES else 1)
-            if pass_ == _N_PASSES:
-                break
-            k = int(assign.max()) + 1
-            target = np.arange(k)
-            if not fixed and not reseeded:
-                Yk = data.pooled(assign, k)[0]
-                sizes = np.bincount(assign, minlength=k)
-                flat = np.array([_flatness(y, lay) for y in Yk])
-                small = sizes < min(_MIN_RESEED, int(sizes.max()))
-                small[0] = False  # the diploid clone itself may be a rare normal population
-                flat[small] = np.inf
-                seed = int(np.argmin(flat))
-                log.debug("copy_number: pass %d, clone flatness %s", pass_, np.round(flat, 3))
-                if flat[seed] < flat[0] - _RESEED_GAP:
-                    reseeded, baseline_method = True, "flattest clone"
-                    target[0], target[seed] = seed, 0
-                    assign = target[assign]
-                    normal = assign == 0
-                    continue
-            amp = np.array([_smooth_amplitude(em.final[3][i], lay) for i in range(k)])
-            log.debug("copy_number: pass %d, clone amplitudes %s", pass_, np.round(amp, 3))
-            target[amp < _AMP_TUMOUR] = 0
-            if (target == np.arange(k)).all():
-                break
-            assign = _compact(target[assign])
-            if not fixed:
-                normal = assign == 0
-
-        if n_fit < n:  # assign every cell with the fitted model, in one pass over the counts
-            ref_all = None if is_ref is None else is_ref[cells]
-            resp, llr = em.assign_all(source, cells, data.project(source, cells), pcs, clusters, ref_all)
+        is_marker = np.asarray(adata.var_names.isin(_marker_list(normal_markers)))
+        pcs_all = data.project(source, cells) if n_fit < n else None
+        runs = []  # (em, resp, llr, baseline method, flatness gap) of each restart
+        for r, seed in enumerate(np.random.SeedSequence(random_state).spawn(n_restarts)):
+            clusters, em, resp, llr, *baseline = _fit_clones(
+                data, hmm, pcs, ref_fit, n_clusters, np.random.default_rng(seed), min_burden, n_iter,
+                (var, candidates, is_marker, normal_markers is not None),
+            )  # fmt: skip
+            if n_fit < n:  # assign every cell with the fitted model, in one pass over the counts
+                resp, llr = em.assign_all(source, cells, pcs_all, pcs, clusters, ref_all)
+            runs.append((em, resp, llr, *baseline))
+            log.debug("copy_number: restart %d, %d clones", r, resp.shape[1])
+        # the restart whose aneuploid/diploid calls agree best with those of the others (the medoid). Agreement is
+        # the share of cells with the same call, not the adjusted Rand index: a fit with an inverted baseline (tumour
+        # cells diploid, normal cells aneuploid) splits the cells like a correct fit, so its ARI with it is 1
+        calls = np.array([resp[:, 1:].sum(axis=1) > 0.5 for _, resp, *_ in runs])
+        agreement = np.array([[(a == b).mean() for b in calls] for a in calls])
+        ari = np.array([[_ari(a, b) for b in calls] for a in calls])
+        best = int(np.argmax(agreement.sum(axis=1)))
+        log.debug("copy_number: restart %d agrees best with the others\n%s", best, np.round(agreement, 3))
+        em, resp, llr, baseline_method, flat_gap = runs[best]
         spatial = None
         if G is not None and resp.shape[1] > 1:
-            ref_cells = None if is_ref is None else is_ref[cells]
             lt, log_prior = em.post_terms
-            resp, spatial = _neighbour_prior(G, cells, resp, lt, log_prior, ref_cells, max_neighbour_weight)
+            resp, spatial = _neighbour_prior(G, cells, resp, lt, log_prior, ref_all, max_neighbour_weight)
         k = resp.shape[1]
         p_an = resp[:, 1:].sum(axis=1)
         clone = np.where(p_an > 0.5, 1 + resp[:, 1:].argmax(axis=1), 0) if k > 1 else np.zeros(n, dtype=np.int64)
@@ -556,7 +526,9 @@ def copy_number(
     }
     if spatial is not None:
         uns["spatial"] = spatial
-    calls = np.where(p_an > 0.5, LABELS[0], LABELS[1])
+    stability = (calls == (p_an > 0.5)).mean(axis=0)
+    uns["restarts"] = {"chosen": best, "agreement": agreement, "ari": ari, "n_aneuploid": calls.sum(axis=1)}
+    labels = np.where(p_an > 0.5, LABELS[0], LABELS[1])
     n_an = int((p_an > 0.5).sum())
     log_result(
         "copy_number",
@@ -582,15 +554,93 @@ def copy_number(
             "(`reference_key`, `reference_cat`) if that is the case."
         )
     return _outputs(
-        adata, cells, key_added, inplace, calls, names[clone], names, cna, uns, gene_values,
-        score=p_an, llr=llr, spill=em.spill,
+        adata, cells, key_added, inplace, labels, names[clone], names, cna, uns, gene_values,
+        score=p_an, llr=llr, spill=em.spill, stability=stability,
     )  # fmt: skip
+
+
+def _fit_clones(data, hmm, pcs, ref_fit, n_clusters, rng, min_burden, n_iter, markers):
+    """One fit of the clones (steps 2 to 7 of `copy_number`), with the k-means starts drawn from `rng`.
+
+    `markers` is `(var, candidates, is_marker, use_markers)`: the gene table, the candidate genes, the normal markers
+    and whether marker-rich types are normal types. Returns the expression types, the fitted `_EM`, the posteriors
+    and log likelihood ratios of the fitted cells, the baseline method and the flatness gap.
+    """
+    var, candidates, is_marker, use_markers = markers
+    lay = data.lay
+    if ref_fit is None:
+        clusters = _kmeans(pcs, min(n_clusters, len(pcs)), rng)
+    else:
+        clusters, ref_type = _kmeans_split(pcs, n_clusters, rng, ref_fit)
+    Yc, Sc = data.pooled(clusters)
+    gene_var = _gene_variability(Yc, Sc, lay)
+    burden = _pairwise_burden(hmm, Yc, Sc, gene_var, lay)
+    groups = _groups(burden, min_burden)
+
+    gcell = groups[clusters]
+    n_groups = int(groups.max()) + 1
+    if ref_fit is not None:
+        normal = ref_fit
+        baseline_method, flat_gap = "reference", np.nan
+    else:
+        marker, total = _marker_counts(data, clusters, Yc, var, candidates, is_marker)
+        normal, baseline_method, flat_gap = _seed(Yc, marker, total, groups, gcell, lay)
+
+    em = _EM(data, hmm, gene_var, min_burden, clusters, Yc, Sc)
+    if ref_fit is not None:
+        # reference types are normal types with a diploid prior, and reference cells stay in the diploid clone
+        # during the fit: with several reference cell types, a reference type whose smooth deviation from the
+        # pooled reference resembles a clone's profile would otherwise join that clone at depth
+        em.normal_type = em.ref_type = ref_type
+        em.pinned = ref_fit
+    elif use_markers:
+        em.normal_type = _marker_types(Yc, marker / total, lay)
+        log.debug("copy_number: marker-rich expression types %s", np.flatnonzero(em.normal_type))
+    frac = np.bincount(gcell, weights=normal, minlength=n_groups) / np.bincount(gcell, minlength=n_groups)
+    lut = np.where(frac > 0.5, 0, 1 + np.arange(n_groups))
+    assign = np.where(normal, 0, lut[gcell])
+    fixed = ref_fit is not None
+    reseeded = "markers" in baseline_method  # marker-rich groups outweigh flatness: no restart
+    # passes: after each, a clearly flatter clone becomes diploid and the passes restart from it, or clones without
+    # a smooth profile merge into the diploid clone; a last single-iteration pass follows the last change
+    for pass_ in range(_N_PASSES + 1):
+        em.set_baseline(normal)
+        assign, resp, llr = em.run(assign, n_iter if pass_ < _N_PASSES else 1)
+        if pass_ == _N_PASSES:
+            break
+        k = int(assign.max()) + 1
+        target = np.arange(k)
+        if not fixed and not reseeded:
+            Yk = data.pooled(assign, k)[0]
+            sizes = np.bincount(assign, minlength=k)
+            flat = np.array([_flatness(y, lay) for y in Yk])
+            small = sizes < min(_MIN_RESEED, int(sizes.max()))
+            small[0] = False  # the diploid clone itself may be a rare normal population
+            flat[small] = np.inf
+            seed = int(np.argmin(flat))
+            log.debug("copy_number: pass %d, clone flatness %s", pass_, np.round(flat, 3))
+            if flat[seed] < flat[0] - _RESEED_GAP:
+                reseeded, baseline_method = True, "flattest clone"
+                target[0], target[seed] = seed, 0
+                assign = target[assign]
+                normal = assign == 0
+                continue
+        amp = np.array([_smooth_amplitude(em.final[3][i], lay) for i in range(k)])
+        log.debug("copy_number: pass %d, clone amplitudes %s", pass_, np.round(amp, 3))
+        target[amp < _AMP_TUMOUR] = 0
+        if (target == np.arange(k)).all():
+            break
+        assign = _compact(target[assign])
+        if not fixed:
+            normal = assign == 0
+    return clusters, em, resp, llr, baseline_method, flat_gap
 
 
 def _outputs(adata, cells, key_added, inplace, labels, clones, clone_names, cna, uns, gene_values, **values):
     """Write the outputs to `adata` (or return them); cells removed by the filters are `"not.defined"`.
 
-    `values` are the float columns (`score`, `llr`, `spill`) of the cells that pass the filters; missing ones are NaN.
+    `values` are the float columns (`score`, `llr`, `spill`, `stability`) of the cells that pass the filters;
+    missing ones are NaN.
     """
 
     def per_cell(x, fill):
@@ -606,6 +656,7 @@ def _outputs(adata, cells, key_added, inplace, labels, clones, clone_names, cna,
             f"{key_added}_llr": per_cell(values.get("llr", np.nan), np.nan),
             f"{key_added}_clone": pd.Categorical(per_cell(clones, LABELS[2]), categories=clone_cats),
             f"{key_added}_spillover": per_cell(values.get("spill", np.nan), np.nan),
+            f"{key_added}_stability": per_cell(values.get("stability", np.nan), np.nan),
         },
         index=adata.obs_names,
     )
@@ -1422,6 +1473,26 @@ def _dosage_weights(mu, lr, v, pn, strength: float = _DOSAGE_PRIOR) -> np.ndarra
     den = (w * m * m).sum(axis=0)
     prior = strength * np.median(den[den > 0]) if (den > 0).any() else 1.0
     return np.clip((num + prior) / (den + prior), 0.0, 2.0)
+
+
+def _ari(a: np.ndarray, b: np.ndarray) -> float:
+    """Adjusted Rand index of two labellings of the same cells: 1 for the same partition, about 0 for chance."""
+    a = np.unique(a, return_inverse=True)[1]
+    b = np.unique(b, return_inverse=True)[1]
+    nb = int(b.max()) + 1 if len(b) else 1
+    table = np.bincount(a * nb + b).astype(np.float64)
+
+    def pairs(x):
+        return float((x * (x - 1)).sum() / 2)
+
+    rows = pairs(np.bincount(a).astype(np.float64))
+    cols = pairs(np.bincount(b).astype(np.float64))
+    total = len(a) * (len(a) - 1) / 2
+    if total == 0:
+        return 1.0
+    expected = rows * cols / total
+    top = (rows + cols) / 2
+    return 1.0 if top == expected else (pairs(table) - expected) / (top - expected)
 
 
 def _compact(assign):
