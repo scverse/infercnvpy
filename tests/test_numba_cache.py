@@ -71,3 +71,19 @@ def test_concurrent_compiles_share_the_cache(tmp_path):
             check=False,
         )
         assert res.returncode == 0, res.stderr
+
+
+def test_cache_key_holds_the_options():
+    """Kernels compiled with other options (set in `_numba`, not in the kernel's module) don't share cache entries."""
+    from numba import float64
+    from numba.core.registry import cpu_target
+
+    from infercnvpy._numba import _KeyedFunctionCache
+
+    def f(x):
+        return x
+
+    codegen = cpu_target.target_context.codegen()
+    a, b = (_KeyedFunctionCache(f, {"nogil": True, "parallel": p}) for p in (False, True))
+    assert a._index_key((float64,), codegen) != b._index_key((float64,), codegen)
+
