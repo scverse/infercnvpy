@@ -1,7 +1,7 @@
 import re
 import warnings
 from collections import deque
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -281,7 +281,7 @@ def infercnv(
     return layout.chr_pos, res, per_gene_mtx
 
 
-def _natural_sort(l: Sequence):
+def _natural_sort(l: Iterable):
     """Natural sort without third party libraries.
 
     Adapted from: https://stackoverflow.com/a/4836734/2340703
