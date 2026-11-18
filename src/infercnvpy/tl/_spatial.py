@@ -206,15 +206,16 @@ def smooth_cnv(
     cells. The mask also does not remove tumor signal that a normal cell carries in its own
     counts, e.g. from spillover or from a segmentation that merged it with a tumor cell. Before
     you set a threshold on the smoothed values, compare the reference cells near the tumor with
-    those far from it at equal neighbor counts, e.g. among the cells that keep all their
-    neighbors after the mask. Reference cells at the border keep fewer neighbors, so their
-    smoothed values are noisier and score higher even without tumor signal. Take the threshold
-    from the far reference cells only if the near ones still score higher at equal neighbor
-    counts, because then they carry tumor signal in their own counts. Even with the mask, more of the normal
-    cells at the border can pass such a threshold after smoothing than without smoothing,
-    because averaging them with their normal neighbors cuts the noise around the signal in
-    their own counts. A call at the border therefore needs evidence per cell beyond the CNV
-    profile, e.g. marker genes or morphology.
+    those far from it in two ways. First, compare their unsmoothed values, which include the
+    cells right at the border. Second, compare their smoothed values among cells with the same
+    number of neighbors after the mask, because reference cells at the border keep fewer
+    neighbors, so their smoothed values are noisier and score higher even without tumor signal.
+    Take the threshold from the far reference cells only if the near ones score higher in one
+    of these comparisons, because then they carry tumor signal in their own counts. Even with
+    the mask, more of the normal cells at the border can pass a threshold after smoothing than
+    without smoothing, because averaging them with their normal neighbors cuts the noise around
+    the signal in their own counts. A call at the border therefore needs evidence per cell
+    beyond the CNV profile, e.g. marker genes or morphology.
 
     Parameters
     ----------
