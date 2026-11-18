@@ -1,4 +1,5 @@
 import logging
+from functools import partial
 
 import anndata as ad
 import numpy as np
@@ -9,6 +10,7 @@ import scanpy as sc
 import scanpy.queries
 
 import infercnvpy.io._scevan
+from infercnvpy._util import _as_df
 from infercnvpy.io import genomic_position_from_biomart, genomic_position_from_gtf, read_scevan
 from infercnvpy.tl import infercnv
 
@@ -101,27 +103,62 @@ def test_genomic_position_from_gtf_duplicates(tmp_path, caplog, gtf_gene_id, n_d
         assert adata.var["chromosome"].notna().all()
 
 
-@pytest.mark.parametrize("lazy", [False, True])
-def test_genomic_position_from_gtf_replaces_existing_columns(tmp_path, lazy):
-    """Positions already in `var`, e.g. from an earlier run, are replaced, and the other columns of `var` are kept."""
-    gtf = tmp_path / "a.gtf"
-    gtf.write_text('chr1\tTEST\tgene\t100\t199\t.\t+\t.\tgene_id "ENSG1"; gene_name "A";\n')
-    var = pd.DataFrame(
-        {"chromosome": ["chr9", "chr9"], "start": [1, 2], "end": [3, 4], "gene_name": ["x", "y"], "other": [5, 6]},
-        index=["A", "B"],
-    )
-    adata = sc.AnnData(np.zeros((2, 2), dtype=np.float32), var=var)
+def _annotated_var(func, adata, tmp_path, lazy, inplace):
+    """`func(adata)` on `adata` in memory or from `read_lazy`, as the returned or the changed `var`."""
     if lazy:
         adata.write_zarr(tmp_path / "a.zarr")
         adata = ad.experimental.read_lazy(tmp_path / "a.zarr")
+    var_before = _as_df(adata.var).copy()
+    res = func(adata, inplace=inplace)
+    if inplace:
+        assert res is None
+        return _as_df(adata.var)
+    pd.testing.assert_frame_equal(_as_df(adata.var), var_before)
+    return res
 
-    res = genomic_position_from_gtf(gtf, adata, inplace=False)
+
+@pytest.mark.parametrize("inplace", [True, False])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_genomic_position_from_gtf_replaces_existing_columns(tmp_path, lazy, inplace):
+    """Positions already in `var`, e.g. from an earlier run, are replaced, and the other columns of `var` win."""
+    gtf = tmp_path / "a.gtf"
+    gtf.write_text('chr1\tTEST\tgene\t100\t199\t.\t+\t.\tgene_id "ENSG1.5"; gene_name "A";\n')
+    var = pd.DataFrame(
+        {"chromosome": ["chr9", "chr9"], "start": [1, 2], "end": [3, 4], "gene_id": ["x", "y"], "other": [5, 6]},
+        index=["A", "B"],
+    )
+    adata = sc.AnnData(np.zeros((2, 2), dtype=np.float32), var=var)
+
+    res = _annotated_var(partial(genomic_position_from_gtf, gtf), adata, tmp_path, lazy, inplace)
 
     assert list(res.index) == ["A", "B"]
-    assert res["chromosome"].tolist()[0] == "chr1" and pd.isna(res["chromosome"].iloc[1])
+    # B has no GTF entry: its old position is not kept
+    assert res["chromosome"].tolist()[0] == "chr1" and res["chromosome"].isna().tolist() == [False, True]
     assert res["start"].tolist()[0] == 100
-    assert res["gene_name"].tolist() == ["x", "y"] and res["other"].tolist() == [5, 6]
-    assert res["gene_id"].tolist()[0] == "ENSG1"
+    assert res["gene_id"].tolist() == ["x", "y"] and res["other"].tolist() == [5, 6]
+    assert res["gene_name"].tolist()[0] == "A"
+    assert not res.columns.str.endswith(("_x", "_y")).any()
+
+
+@pytest.mark.parametrize("inplace", [True, False])
+def test_genomic_position_from_biomart_replaces_existing_columns(monkeypatch, tmp_path, inplace):
+    """The BioMart reader shares the rules: positions are replaced, a duplicated id gets none."""
+    annot = pd.DataFrame(
+        {
+            "ensembl_gene_id": ["ENSG1", "ENSG2", "ENSG2"],
+            "start_position": [10, 20, 30],
+            "end_position": [15, 25, 35],
+            "chromosome_name": ["1", "2", "3"],
+        }
+    )
+    monkeypatch.setattr(scanpy.queries, "biomart_annotations", lambda *args, **kwargs: annot.copy())
+    var = pd.DataFrame({"chromosome": ["chr9", "chr9"], "start": [1, 2], "end": [3, 4]}, index=["ENSG1", "ENSG2"])
+    adata = sc.AnnData(np.zeros((2, 2), dtype=np.float32), var=var)
+
+    res = _annotated_var(genomic_position_from_biomart, adata, tmp_path, False, inplace)
+
+    assert res["chromosome"].tolist()[0] == "chr1" and res["chromosome"].isna().tolist() == [False, True]
+    assert res["start"].tolist()[0] == 10
     assert not res.columns.str.endswith(("_x", "_y")).any()
 
 

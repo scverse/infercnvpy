@@ -8,9 +8,20 @@ import scanpy.queries
 from anndata import AnnData
 
 from infercnvpy._logging import log_result
-from infercnvpy._util import _as_df
+from infercnvpy._util import _as_df, _splice_doc
+
+_MERGE_RULES = """\
+When adata is given, the annotation replaces the `chromosome`, `start` and `end` columns that
+`adata.var` already has, and existing positions are not kept as a fallback. Genes without an
+entry in the annotation get missing positions, and so do genes whose id has more than one entry.
+The log reports the number of such genes, and `adata.var["chromosome"].isna().sum()` counts
+them after the call (with `inplace=False`, the same on the returned data frame).
+:func:`infercnvpy.tl.infercnv` skips genes without a position. For any other column name, an
+existing `adata.var` column wins over an annotation column of the same name.
+"""
 
 
+@_splice_doc(merge_rules=_MERGE_RULES)
 def genomic_position_from_biomart(
     adata: AnnData | None = None,
     *,
@@ -22,6 +33,8 @@ def genomic_position_from_biomart(
 ) -> pd.DataFrame | None:
     """
     Get genomic gene positions from ENSEMBL Biomart.
+
+    {merge_rules}
 
     Parameters
     ----------
@@ -35,11 +48,8 @@ def genomic_position_from_biomart(
         The biomart column to use as gene identifier. Typically this would be `ensembl_gene_id` or `hgnc_symbol`,
         but could be different for other species.
     inplace
-        If True, add the annotations directly to adata, otherwise return a dataframe.
-        In both cases, the annotations overwrite the `chromosome`, `start` and `end` columns
-        that `adata.var` already has, and genes without a match get missing positions.
-        Other columns of `adata.var` with the same name as an annotation column are kept
-        as they are.
+        If True, add the annotations to `adata.var`. If False, return a copy of `adata.var`
+        with the annotations and leave adata unchanged. Ignored when adata is None.
     **kwargs
         passed on to :func:`scanpy.queries.biomart_annotations`
     """
@@ -85,6 +95,7 @@ def genomic_position_from_biomart(
     return var_annotated
 
 
+@_splice_doc(merge_rules=_MERGE_RULES)
 def genomic_position_from_gtf(
     gtf_file: Path | str,
     adata: AnnData | None = None,
@@ -97,6 +108,8 @@ def genomic_position_from_gtf(
     Get genomic gene positions from a GTF file.
 
     The GTF file needs to match the genome annotation used for your single cell dataset.
+
+    {merge_rules}
 
     .. warning::
         Currently only tested with GENCODE GTFs.
@@ -114,11 +127,8 @@ def genomic_position_from_gtf(
         Match this column to the gene ids from the GTF file. Default: use
         adata.var_names.
     inplace
-        If True, add the annotations directly to adata, otherwise return a dataframe.
-        In both cases, the annotations overwrite the `chromosome`, `start` and `end` columns
-        that `adata.var` already has, and genes without a match get missing positions.
-        Other columns of `adata.var` with the same name as an annotation column, e.g.
-        `gene_name`, are kept as they are.
+        If True, add the annotations to `adata.var`. If False, return a copy of `adata.var`
+        with the annotations and leave adata unchanged. Ignored when adata is None.
     """
     try:
         import gtfparse
