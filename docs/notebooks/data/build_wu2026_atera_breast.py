@@ -1,4 +1,4 @@
-"""Build the example dataset `infercnvpy.datasets.wu2026_atera_breast`.
+r"""Build the example dataset `infercnvpy.datasets.wu2026_atera_breast`.
 
 The script documents how the file on exampledata.scverse.org was made. It is not run by CI, and it needs
 intermediate files that are not public:
@@ -17,7 +17,7 @@ intermediate files that are not public:
 `--arms-raw`, `--arms-centred`
     Arm-level log2 copy ratios per WGS run, from the WGS reads of SRA PRJNA1509685: GRCh38 primary assembly,
     bwa-mem2, duplicates marked and skipped, CNVkit 0.9.13 in WGS mode against a flat reference, 5 kb bins, CBS,
-    log2 clipped to [-2, 2], and the length-weighted mean of the segments per arm. The centred table subtracts the
+    log2 clipped to [-2, 2], and the length-weighted mean of the segments per arm. The centered table subtracts the
     mean of the runs of regions 1 and 2.
 
 The arm table and the labels added here are derived data by the infercnvpy authors, licensed under CC BY 4.0, from
@@ -25,7 +25,7 @@ Wu et al. 2026 and SRA PRJNA1509685. The 10x data are licensed under CC BY 4.0.
 
 Usage::
 
-    python build_wu2026_atera_breast.py --source atera.h5ad --raw atera_raw.h5ad --regions region_cells.tsv.gz \\
+    python build_wu2026_atera_breast.py --source atera.h5ad --raw atera_raw.h5ad --regions region_cells.tsv.gz \
         --arms-raw qc_arms.cnvkit.raw.tsv --arms-centred qc_arms.cnvkit.centred.tsv --out wu2026_atera_breast.h5ad
 """
 
@@ -42,7 +42,7 @@ from anndata.io import sparse_dataset
 
 # clone groups of the dissected regions, from the region colors of Fig. 3g of Wu et al. 2026
 GROUPS = {"A": ["10"], "C": ["3", "5", "6", "7", "8", "9", "15", "16"], "N": ["1", "2"]}
-REGION_GROUP = {**{r: "C" for r in GROUPS["C"]}, "10": "A", "1,2": "N"}  # regions 1 and 2 share one outline
+REGION_GROUP = {**dict.fromkeys(GROUPS["C"], "C"), "10": "A", "1,2": "N"}  # regions 1 and 2 share one outline
 
 DESCRIPTION = (
     "Arm-level copy number of the laser-dissected DCIS regions of Wu et al. 2026 (WGS, SRA PRJNA1509685). "
