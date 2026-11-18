@@ -5,7 +5,13 @@ import scanpy as sc
 from anndata import AnnData
 
 from infercnvpy._logging import log
-from infercnvpy._util import _as_matrix, _copy_for_inplace_false, _deprecated_positional
+from infercnvpy._util import (
+    _as_matrix,
+    _check_adata_in_memory,
+    _check_graph_in_memory,
+    _copy_for_inplace_false,
+    _deprecated_positional,
+)
 
 from ._copy_number import copy_number
 from ._detectability import detectability
@@ -120,6 +126,8 @@ def leiden(
         kwargs["n_iterations"] = n_iterations
     if directed is not None:
         kwargs["directed"] = directed
+    if "adjacency" not in kwargs:
+        _check_graph_in_memory(adata, neighbors_key)
     return sc.tl.leiden(
         adata,
         neighbors_key=neighbors_key,
@@ -230,6 +238,8 @@ def umap(
     `adata.obsm["X_{key_added}"]` : :class:`numpy.ndarray`
         UMAP coordinates, cells x `n_components` (default 2).
     """
+    _check_adata_in_memory(adata, backed=True)  # scanpy can't copy a backed AnnData
+    _check_graph_in_memory(adata, neighbors_key)
     tmp_adata = sc.tl.umap(adata, neighbors_key=neighbors_key, copy=True, **kwargs)
 
     if inplace:
@@ -282,6 +292,7 @@ def tsne(
         :func:`infercnvpy.tl.pca` at default settings. This is set even if
         `inplace=False`.
     """
+    _check_adata_in_memory(adata, backed=True)  # scanpy can't copy a backed AnnData
     if f"X_{use_rep}" not in adata.obsm and use_rep == "cnv_pca":
         pca(adata)
         log.info("tsne: computed X_cnv_pca with default parameters, as it was not in adata.obsm")

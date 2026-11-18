@@ -373,6 +373,44 @@ def test_read_lazy_spatial(oligo, tmp_path):
     assert (lazy_types.get_facecolors()[:, 1:3] == 0).all()  # the colors of `uns`, which have no green or blue
 
 
+def test_scanpy_wrappers_on_lazy_and_backed(oligo, tmp_path):
+    """umap and leiden ask to load a lazy graph, the embedding plots a `read_lazy` AnnData, and umap and tsne a backed
+    one (which scanpy can't copy); the embedding plots and leiden work on a backed AnnData."""
+    b = oligo.copy()
+    cnv.tl.infercnv(b, **REF)
+    cnv.pp.neighbors(b)
+    cnv.tl.umap(b)
+    cnv.tl.tsne(b)
+    cnv.tl.leiden(b)
+    b.write_zarr(tmp_path / "cnv.zarr")
+    b.write_h5ad(tmp_path / "cnv.h5ad")
+    a = ad.experimental.read_lazy(tmp_path / "cnv.zarr")
+    graph = "cnv_neighbors_connectivities"
+    for call in (lambda: cnv.tl.umap(a), lambda: cnv.tl.leiden(a)):
+        with pytest.raises(TypeError, match=re.escape(f"`adata.obsp['{graph}'] = adata.obsp['{graph}'].compute()`")):
+            call()
+    a.obsp[graph] = a.obsp[graph].compute()
+    cnv.tl.leiden(a)
+    np.testing.assert_array_equal(np.asarray(a.obs["cnv_leiden"]).astype(str), b.obs["cnv_leiden"].astype(str))
+    cnv.tl.umap(a)
+    assert a.obsm["X_cnv_umap"].shape == (a.n_obs, 2)
+    for call in (lambda: cnv.pl.umap(a, show=False), lambda: cnv.pl.tsne(a, show=False)):
+        with pytest.raises(
+            TypeError, match=re.escape("an AnnData from `anndata.experimental.read_lazy`. Load it first")
+        ):
+            call()
+    backed = ad.read_h5ad(tmp_path / "cnv.h5ad", backed="r")
+    for call in (lambda: cnv.tl.umap(backed), lambda: cnv.tl.tsne(backed)):
+        with pytest.raises(
+            TypeError, match=re.escape("got a backed AnnData. Load it first with `adata = adata.to_memory()`")
+        ):
+            call()
+    cnv.tl.leiden(backed, key_added="leiden_backed")
+    pd.testing.assert_series_equal(backed.obs["leiden_backed"], b.obs["cnv_leiden"], check_names=False)
+    cnv.pl.umap(backed, color="cnv_leiden", show=False)
+    cnv.pl.tsne(backed, color="cnv_leiden", show=False)
+
+
 def test_read_lazy_gtf(testdata, tmp_path):
     """`io.genomic_position_from_gtf` loads the lazy `var` of `read_lazy`."""
     gtf = testdata / "chr21_gencode.gtf"

@@ -115,13 +115,16 @@ The other functions raise an error unless their input is in memory:
 - the representation that {func}`infercnvpy.pp.neighbors` and {func}`infercnvpy.tl.tsne` read (`use_rep`, by default
   the PCA `adata.obsm["X_cnv_pca"]`), and the CNV matrix when they compute the PCA,
 - the expression matrix (`adata.X`, or the layer you pass) for {func}`infercnvpy.tl.ithgex`, and the raw counts
-  (`adata.X`, or the layer you pass) for {func}`infercnvpy.tl.detectability`.
+  (`adata.X`, or the layer you pass) for {func}`infercnvpy.tl.detectability`,
+- the neighborhood graph of {func}`infercnvpy.pp.neighbors` (in `adata.obsp`) for {func}`infercnvpy.tl.umap` and
+  {func}`infercnvpy.tl.leiden`,
+- the whole AnnData for {func}`infercnvpy.pl.umap` and {func}`infercnvpy.pl.tsne` on an AnnData from
+  {func}`anndata.experimental.read_lazy`,
+- the whole AnnData for {func}`infercnvpy.tl.umap` and {func}`infercnvpy.tl.tsne` on a backed AnnData, because scanpy
+  can't copy a backed AnnData.
 
-A backed AnnData keeps `obsm` and `obsp` in memory, so the functions above work on it, except
-{func}`~infercnvpy.tl.ithgex`, {func}`~infercnvpy.tl.detectability` and {func}`~infercnvpy.tl.tsne`. On a backed
-AnnData, {func}`~infercnvpy.tl.tsne` and {func}`infercnvpy.tl.umap` fail with an error from anndata. On an AnnData
-from {func}`~anndata.experimental.read_lazy`, {func}`~infercnvpy.tl.umap`, {func}`infercnvpy.tl.leiden` and
-{func}`infercnvpy.pl.umap` fail with errors from scanpy. Load the AnnData first in these cases.
+A backed AnnData keeps `obsm` and `obsp` in memory, so on a backed AnnData only {func}`infercnvpy.tl.ithgex`,
+{func}`infercnvpy.tl.detectability`, {func}`infercnvpy.tl.umap` and {func}`infercnvpy.tl.tsne` need it loaded.
 
 {func}`~infercnvpy.tl.smooth_cnv` also returns a dense float32 matrix (cells x windows). Load the input before you call
 these functions:
@@ -129,5 +132,10 @@ these functions:
 ```python
 adata.obsm["X_cnv"] = adata.obsm["X_cnv"].compute()  # a dask array
 adata.X = adata.X.compute()  # a dask expression matrix, or the same for the layer you pass
-adata = adata.to_memory()  # an AnnData from read_lazy or a backed file
+graph = "cnv_neighbors_connectivities"  # the key of the graph that the error names
+adata.obsp[graph] = adata.obsp[graph].compute()
+adata = adata.to_memory()  # an AnnData from read_lazy or a backed file, including adata.X
 ```
+
+`adata.to_memory()` also loads the expression matrix, which can be the largest part of the data. Load single fields
+with `.compute()` where the error names one.

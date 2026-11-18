@@ -46,6 +46,27 @@ def _as_matrix(x, what: str = "the expression matrix", *, lazy: bool = False):
     raise TypeError(f"infercnvpy needs {what} as {kinds}, got {type(x).__name__}.")
 
 
+def _check_adata_in_memory(adata, *, backed: bool = False, lazy: bool = False) -> None:
+    """Raise the "load it first" error for a backed AnnData (with `backed`) or one from `read_lazy` (with `lazy`)."""
+    if backed and adata.isbacked:
+        kind = "a backed AnnData"
+    elif lazy and not isinstance(adata.obs, pd.DataFrame):
+        kind = "an AnnData from `anndata.experimental.read_lazy`"
+    else:
+        return
+    raise TypeError(
+        f"This function needs the AnnData in memory, got {kind}. Load it first with `adata = adata.to_memory()`."
+    )
+
+
+def _check_graph_in_memory(adata, neighbors_key: str) -> None:
+    """Raise the "load it first" error if the graph of `pp.neighbors` (in `adata.obsp`) is lazy, as from `read_lazy`."""
+    if neighbors_key in adata.uns:  # else scanpy raises its own error
+        key = str(adata.uns[neighbors_key].get("connectivities_key", "connectivities"))
+        if key in adata.obsp:
+            _as_matrix(adata.obsp[key], f"`obsp[{key!r}]`")
+
+
 def _check_counts(values: np.ndarray, tool: str) -> None:
     """Raise unless `values` are raw counts (non-negative integers)."""
     if values.size and (values.min() < 0 or np.any(values != np.round(values))):
