@@ -73,30 +73,38 @@ def maynard2020_3k() -> AnnData:
 
 
 def wu2026_atera_breast() -> AnnData:
-    """A window of a 10x Atera whole transcriptome section of breast cancer, with arm-level copy number from WGS.
+    """A region of a 10x Atera whole transcriptome section of breast cancer, with arm-level copy number from WGS.
 
-    43,700 cells and 18,028 genes from a window of the section (x 0 to 3,750 µm, y from 750 µm) of an FFPE ductal
-    carcinoma in situ (DCIS, grade 3) measured with 10x Atera in situ gene expression. :cite:`Wu2026` analyzed the
-    same section, and they sequenced the DNA (whole genome sequencing, WGS) of laser-dissected regions of consecutive
-    sections from the same block.
+    Cells from a cropped region of a section of an FFPE ductal carcinoma in situ (DCIS) measured with 10x Atera in
+    situ gene expression. :cite:`Wu2026` analyzed the same section, and they sequenced the DNA (whole genome
+    sequencing, WGS) of laser-dissected regions of consecutive sections from the same block.
 
-    * `adata.X` holds the raw counts of the vendor segmentation (integers). `adata.var` has the gene positions
-      (GRCh38) in `chromosome`, `start` and `end`, and `adata.obsm["spatial"]` the cell centroids in µm.
-    * `adata.obs["cell_type"]` holds cell types from expression clustering, and `adata.obs["pred_state"]` the
-      epithelial states transferred from the annotated cells of :cite:`Wu2026` (e.g. normal luminal or DCIS).
-    * `adata.obs["wgs_clone_group"]` is the clone group (A, C or N) of the dissected region around the cell, and
-      `adata.uns["wgs_truth"]["arms"]` the arm-level log2 copy ratios of each clone group. The infercnvpy authors
-      computed them from the WGS reads in the SRA (PRJNA1509685) with CNVkit. The region outlines were placed on the
-      section by hand from a figure of the preprint, so the mapping holds at the level of
-      clone groups only, and group N (regions 1 and 2) contains some tumor. `adata.uns["wgs_truth"]["description"]`
-      describes the pipeline and these limits.
+    * `adata.X` holds the raw counts of the vendor segmentation (integers). `adata.var` has `gene_ids` and the gene
+      positions (GRCh38) in `chromosome`, `start` and `end`, and `adata.obsm["spatial"]` holds the cell centroids in
+      µm.
+    * `adata.obs` has `cell_type` (cell types from expression clustering), `pred_state` (epithelial states
+      transferred from the annotated cells of :cite:`Wu2026`), `wgs_region` (the dissected region whose outline
+      contains the cell), `wgs_clone_group` (the clone group A, C or N of that region) and `wgs_region_ensemble_frac`
+      (the share of perturbed placements of the outlines that also put the cell inside).
+    * `adata.uns["wgs_truth"]["arms"]` holds the log2 copy ratio of each clone group and arm, with the columns
+      `clone_group`, `arm`, `kind` (`"arm"` or `"focal"`), `log2`, `log2_centred_on_N`, `log2_min_region`,
+      `log2_max_region`, `n_regions` and `wgs_runs`. `adata.uns["wgs_truth"]["arms_by_wgs_run"]` holds the same per
+      WGS run, and `adata.uns["wgs_truth"]["description"]` describes the pipeline and its limits.
+      `adata.uns["source"]` holds the sources and the attribution, and `adata.uns["window_um"]` the bounds of the
+      region.
+
+    The infercnvpy authors computed the arm table from the WGS reads in the SRA (PRJNA1509685) with CNVkit. The region
+    outlines were placed on the section by hand from a figure of the preprint, so the mapping holds at the level of
+    clone groups only, and group N contains some tumor. The script `docs/notebooks/data/build_wu2026_atera_breast.py`
+    in the infercnvpy repository shows how the file was built.
 
     The data are a preview, which 10x generated with development versions of the panel, protocols and software and may
     replace later. Source: "Preview Data: Atera In Situ Gene Expression, FFPE Human Breast Cancer. Atera Onboard
     Analysis (development version), 10x Genomics (2026, June 2)",
     https://www.10xgenomics.com/datasets/atera-wta-ffpe-human-breast-cancer, licensed under CC BY 4.0
-    (https://creativecommons.org/licenses/by/4.0/). The subset, the cell types and the WGS labels are changes by the
-    infercnvpy authors (`adata.uns["source"]`). When you use the data, cite 10x Genomics as above and :cite:`Wu2026`.
+    (https://creativecommons.org/licenses/by/4.0/). The subset, the cell labels, the region labels and the arm table
+    are changes and derived data by the infercnvpy authors, also licensed under CC BY 4.0, from :cite:`Wu2026` and
+    SRA PRJNA1509685. When you use the data, cite 10x Genomics as above and :cite:`Wu2026`.
 
     {pooch_info}
     """
