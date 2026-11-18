@@ -56,6 +56,42 @@ def test_smooth_cnv_matches_scipy(graph_and_cnv, fmt, alpha, n_hops):
     np.testing.assert_array_equal(res[5], X[5])  # no neighbors: unchanged
 
 
+_REGRESSION_EXPECTED = {
+    1: [
+        [0.1111111, 0.0666667, -0.1777778],
+        [0.0666667, 0.0333333, -0.1],
+        [-0.0107143, 0.3, -0.0142857],
+        [-0.15, 0.3, 0.15],
+        [0.5, -0.4, 0.3],
+    ],
+    2: [
+        [0.0642857, 0.1037037, -0.1068783],
+        [0.0556878, 0.1333333, -0.0973545],
+        [-0.0407738, 0.2178572, 0.0202381],
+        [-0.0803571, 0.3, 0.0678571],
+        [0.5, -0.4, 0.3],
+    ],
+}
+
+
+@pytest.mark.parametrize("fmt", [np.asarray, sp.csr_matrix])
+@pytest.mark.parametrize("n_hops", [1, 2])
+def test_smooth_cnv_default_regression(fmt, n_hops):
+    """Default smoothing on a fixed weighted graph equals hard-coded values from before the reference mask.
+
+    The values were computed with `tl.smooth_cnv` at 45c58a5. Unlike `test_smooth_cnv_matches_scipy`, the test
+    fails if the kernel and `_reference` change together. Cell 4 has no neighbors and keeps its values.
+    """
+    X = np.array([[0.4, -0.2, 0.0], [0.1, 0.3, -0.5], [-0.3, 0.0, 0.2], [0.0, 0.6, 0.1], [0.5, -0.4, 0.3]], np.float32)
+    W = [[0, 1, 0.5, 0, 0], [1, 0, 1, 0, 0], [0.5, 1, 0, 2, 0], [0, 0, 2, 0, 0], [0, 0, 0, 0, 0]]
+    adata = AnnData(obs=pd.DataFrame(index=list("abcde")), obsm={"X_cnv": fmt(X)})
+    adata.obsp["spatial_connectivities"] = sp.csr_matrix(np.array(W, dtype=np.float32))
+    cnv.tl.smooth_cnv(adata, n_hops=n_hops)
+    np.testing.assert_allclose(adata.obsm["X_cnv_smoothed"], _REGRESSION_EXPECTED[n_hops], rtol=0, atol=1e-6)
+    params = adata.uns["cnv_smoothed"]["params"]
+    assert (params["reference_key"], params["reference_cat"]) == (None, None)
+
+
 def test_serial_twin_matches(graph_and_cnv):
     G, X = graph_and_cnv
     args = (G.indptr, G.indices, G.data, -1.0)
