@@ -205,7 +205,10 @@ def test_lazy_without_threshold(oligo, expected):
         _with_X(oligo, _csr_blocks(oligo, 50)), **REF, dynamic_threshold=None, lazy=True, inplace=False
     )
     want = cnv.tl.infercnv(oligo, **REF, dynamic_threshold=None, inplace=False)[1]
-    np.testing.assert_allclose(res[1].compute().toarray(), want.toarray(), rtol=1e-5, atol=1e-5)
+    got = res[1].compute()
+    assert isinstance(got, np.ndarray)
+    assert isinstance(want, np.ndarray)
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
 
 
 def test_lazily_normalised_table(oligo):

@@ -48,7 +48,7 @@ def infercnv(
     key_added: str = "cnv",
     calculate_gene_values: bool = False,
     min_mean: float | None = None,
-) -> None | tuple[dict, sp.csr_matrix, np.ndarray | None]:
+) -> None | tuple[dict, sp.csr_matrix | np.ndarray, np.ndarray | None]:
     """Infer Copy Number Variation (CNV) by averaging gene expression over genomic regions.
 
     This method is heavily inspired by `infercnv <https://github.com/broadinstitute/inferCNV/>`_
@@ -68,6 +68,9 @@ def infercnv(
         By default, the noise threshold is computed from the reference cells (`noise_reference`),
         not separately for each chunk of `chunksize` cells, so the result no longer depends on
         `chunksize`. The CNV matrix and the gene values are float32.
+
+    .. versionchanged:: 0.7.0
+        The CNV matrix can be a dense array instead of a CSR matrix, with the same values, see Returns.
 
     .. versionadded:: 0.7.0
         `min_mean`, to leave out lowly expressed genes as the `cutoff` of R inferCNV does.
@@ -158,10 +161,16 @@ def infercnv(
     `gene_values` is `None` unless `calculate_gene_values=True`.
     Sets the following fields:
 
-    `adata.obsm["X_{key_added}"]` : :class:`scipy.sparse.csr_matrix`
+    `adata.obsm["X_{key_added}"]` : :class:`scipy.sparse.csr_matrix` or :class:`numpy.ndarray`
         Smoothed and denoised CNV values (float32), cells x genomic windows, ordered by
-        chromosome and genomic position. With `lazy`, a :class:`dask.array.Array` of
-        CSR blocks.
+        chromosome and genomic position. Values inside the noise band of `dynamic_threshold`
+        are 0. The matrix is a :class:`numpy.ndarray` when that needs less memory than a CSR
+        matrix, and a CSR matrix otherwise, with the same values either way. A CSR matrix stores
+        each non-zero value with its column index (8 bytes), and an array stores every value
+        (4 bytes). So the matrix is an array when more than about half of its values are
+        non-zero, and always with `dynamic_threshold=None`. Code that needs one of the two can
+        check with :func:`scipy.sparse.issparse`. With `lazy`, a :class:`dask.array.Array` of
+        CSR blocks without this size check, or of dense blocks with `dynamic_threshold=None`.
     `adata.uns[key_added]["chr_pos"]` : :class:`dict`
         Maps each chromosome to the column of `X_{key_added}` where it starts.
     `adata.uns[key_added]["window_start"]`, `adata.uns[key_added]["window_end"]` : :class:`numpy.ndarray`
@@ -456,6 +465,9 @@ _READ_AHEAD = {"dask": 4, "backed": 2}
 #: `(threshold, centre)` that removes nothing
 _NO_BAND = (-1.0, 0.0)
 
+#: values per block of rows when a CSR result is turned into a dense array
+_DENSE_BLOCK = 1 << 24
+
 
 def _noise_band(plan: _Plan, rowstats: np.ndarray) -> tuple[float, float]:
     """`(threshold, centre)` of the noise band from the per-cell (sum, sum of squares) of the windows."""
@@ -506,13 +518,34 @@ class _CsrBuilder:
         _fill_kept(windows, *band, indptr, self.data, self.indices)
         self.n = r1
 
-    def finish(self) -> sp.csr_matrix:
+    def finish(self) -> sp.csr_matrix | np.ndarray:
+        """The CSR matrix, or a dense array if that is smaller."""
         nnz = int(self.indptr[-1])
         self.data.resize(nnz, refcheck=False)
         self.indices.resize(nnz, refcheck=False)
         idx_dtype = np.int32 if max(nnz, self.shape[1]) < np.iinfo(np.int32).max else np.int64
+        n_rows, n_cols = self.shape
+        idx_size = np.dtype(idx_dtype).itemsize
+        if n_rows * n_cols * self.data.itemsize < nnz * (self.data.itemsize + idx_size) + (n_rows + 1) * idx_size:
+            return self._to_dense()
         indices = self.indices.astype(idx_dtype, copy=False)
         return sp.csr_matrix((self.data, indices, self.indptr.astype(idx_dtype)), shape=self.shape, copy=False)
+
+    def _to_dense(self) -> np.ndarray:
+        """The rows as a dense array, filled from the last block of rows on while the CSR arrays shrink behind it."""
+        out = np.zeros(self.shape, dtype=np.float32)  # the operating system maps the pages as they are written
+        step = max(1, _DENSE_BLOCK // max(self.shape[1], 1))
+        for r1 in range(self.shape[0], 0, -step):
+            r0 = max(r1 - step, 0)
+            s, e = int(self.indptr[r0]), int(self.indptr[r1])
+            block = sp.csr_matrix(
+                (self.data[s:e], self.indices[s:e], self.indptr[r0 : r1 + 1] - s), shape=(r1 - r0, self.shape[1])
+            )
+            block.toarray(out=out[r0:r1])
+            del block
+            self.data.resize(s, refcheck=False)
+            self.indices.resize(s, refcheck=False)
+        return out
 
 
 def _to_csr(windows: np.ndarray, counts: np.ndarray, band: tuple[float, float]) -> sp.csr_matrix:
@@ -547,18 +580,26 @@ def _run(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_values
         band = _noise_band(plan, rowstats)
     else:
         band = None if plan.dynamic_threshold is not None else _NO_BAND
-    builder = _CsrBuilder(source.n_obs, plan.layout.n_windows)
+    shape = (source.n_obs, plan.layout.n_windows)
+    # without a threshold every value is kept, and a dense array is smaller than a CSR matrix
+    res = np.empty(shape, dtype=np.float32) if plan.dynamic_threshold is None else _CsrBuilder(*shape)
     gv = np.full((source.n_obs, plan.layout.n_vars), np.nan, dtype=np.float32) if gene_values else None
+    r0 = 0
     for X, rows in source.rows_of(None):
         windows, rowstats, counts = _windows(plan, X, rows, band)
+        r1 = r0 + len(rows)
         if band is None:  # a single block defines the band
             band = _noise_band(plan, rowstats if band_rows is None else rowstats[band_rows])
             _count_kept(windows, *band, counts)
         if gv is not None:
-            _gene_values_of(plan, windows, band, gv[builder.n : builder.n + len(rows)])
-        builder.add(windows, counts, band)
+            _gene_values_of(plan, windows, band, gv[r0:r1])
+        if isinstance(res, np.ndarray):
+            np.add(windows, 0, out=res[r0:r1])  # a copy that turns -0.0 into 0, as `toarray()` does
+        else:
+            res.add(windows, counts, band)
+        r0 = r1
     assert band is not None
-    return builder.finish(), gv, band
+    return (res if isinstance(res, np.ndarray) else res.finish()), gv, band
 
 
 def _run_lazy(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_values: bool):
@@ -579,7 +620,9 @@ def _run_lazy(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_v
         partial(_lazy_cnv_block, plan, band),
         dtype=np.float32,
         chunks=(X.chunks[0], (lay.n_windows,)),
-        meta=sp.csr_matrix((0, lay.n_windows), dtype=np.float32),
+        meta=np.empty((0, lay.n_windows), dtype=np.float32)
+        if plan.dynamic_threshold is None
+        else sp.csr_matrix((0, lay.n_windows), dtype=np.float32),
     )
     gv = None
     if gene_values:
@@ -599,10 +642,10 @@ def _dask_stats_task(block, plan: _Plan, local: np.ndarray | None) -> np.ndarray
 
 
 @dask_task
-def _lazy_cnv_block(plan: _Plan, band, block) -> sp.csr_matrix:
+def _lazy_cnv_block(plan: _Plan, band, block) -> sp.csr_matrix | np.ndarray:
     X = _kernel_ready(block)
     windows, _, counts = _windows(plan, X, np.arange(X.shape[0]), band)
-    return _to_csr(windows, counts, band)
+    return np.add(windows, 0, out=windows) if plan.dynamic_threshold is None else _to_csr(windows, counts, band)
 
 
 @dask_task

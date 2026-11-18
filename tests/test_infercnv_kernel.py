@@ -142,7 +142,7 @@ def test_running_mean_values():
     assert chr_pos == {"chr1": 0, "chr2": 3}
     # chr1 in genomic order is 2, 3, 4, 5, 1: windows 3, 4, 15/4 (pyramid 1, 2, 1); chr2 is a single window
     windows = np.array([[3, 4, 15 / 4, 2], [8, 9, 35 / 4, 5]])
-    np.testing.assert_allclose(res.toarray(), windows - np.median(windows, axis=1, keepdims=True), rtol=1e-6)
+    np.testing.assert_allclose(res, windows - np.median(windows, axis=1, keepdims=True), rtol=1e-6)
     # a gene is the mean of the windows that contain it
     genes = np.array([[15 / 4, 3, 7 / 2, 43 / 12, 31 / 8, 2, 2, 2], [35 / 4, 8, 17 / 2, 103 / 12, 71 / 8, 5, 5, 5]])
     np.testing.assert_allclose(gv, genes - np.median(genes, axis=1, keepdims=True), rtol=1e-6)
@@ -187,11 +187,40 @@ def test_noise_reference(oligo):
     reference = cnv.tl._infercnv._get_reference(oligo, REF["reference_key"], REF["reference_cat"], None, None)
     # without reference cells, both the band of the reference cells and the global std use all cells
     explicit = cnv.tl.infercnv(oligo, reference=reference, inplace=False)[1]
-    unthresholded = _run(oligo, dynamic_threshold=None)[1].toarray().astype(np.float64)
+    unthresholded = _run(oligo, dynamic_threshold=None)[1].astype(np.float64)
     centre, thr = unthresholded.mean(), 1.5 * unthresholded.std(axis=1, ddof=1).mean()
     expected = np.where(np.abs(unthresholded - centre) < thr, 0, unthresholded)
     np.testing.assert_array_equal(explicit.toarray(), expected)
     assert (explicit != ref).nnz > 0
+
+
+@pytest.mark.parametrize("fmt", [np.asarray, sp.csr_matrix])
+@pytest.mark.parametrize(("dynamic_threshold", "dense"), [(None, True), (1.5, False), (0.3, True)])
+def test_x_cnv_is_stored_in_the_smaller_format(oligo, monkeypatch, fmt, dynamic_threshold, dense):
+    """X_cnv is a dense array when that needs less memory than CSR, with the values of the CSR matrix."""
+    monkeypatch.setattr(cnv.tl._infercnv, "_DENSE_BLOCK", 1000)  # a CSR matrix becomes an array in many blocks
+    csr = []
+    to_dense = cnv.tl._infercnv._CsrBuilder._to_dense
+
+    def keep_csr(builder):
+        csr.append(sp.csr_matrix((builder.data.copy(), builder.indices.copy(), builder.indptr), shape=builder.shape))
+        return to_dense(builder)
+
+    monkeypatch.setattr(cnv.tl._infercnv._CsrBuilder, "_to_dense", keep_csr)
+    adata = oligo.copy()
+    adata.X = fmt(oligo.X.toarray())
+    res = _run(adata, dynamic_threshold=dynamic_threshold, chunksize=50)[1]
+    assert isinstance(res, np.ndarray if dense else sp.csr_matrix)
+    assert res.dtype == np.float32
+    if dynamic_threshold is None:  # nothing is removed, so the array is built directly
+        assert not csr
+        assert np.count_nonzero(res) > res.size / 2
+    elif dense:
+        fill = csr[0].nnz / res.size
+        assert fill > 1 / 2
+        assert res.tobytes() == csr[0].toarray().tobytes()
+    else:
+        assert res.nnz < res.shape[0] * res.shape[1] / 2
 
 
 def test_n_jobs(oligo):
