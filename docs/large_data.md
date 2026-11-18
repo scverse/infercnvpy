@@ -104,9 +104,9 @@ by block:
 - {func}`infercnvpy.pl.chromosome_heatmap` and {func}`~infercnvpy.pl.chromosome_heatmap_summary` with `mode="fast"`,
 - {func}`infercnvpy.tl.cnv_score`.
 
-{func}`infercnvpy.tl.copy_number` also reads a dask or backed expression matrix block by block. On an AnnData from
-{func}`~anndata.experimental.read_lazy`, {func}`infercnvpy.tl.spatial_regions` and
-{func}`infercnvpy.io.genomic_position_from_gtf` work as they do in memory.
+{func}`infercnvpy.tl.copy_number` also reads a dask or backed expression matrix block by block, and makes the same
+calls as in memory. On an AnnData from {func}`~anndata.experimental.read_lazy`, {func}`infercnvpy.tl.spatial_regions`
+and {func}`infercnvpy.io.genomic_position_from_gtf` give the same result as in memory.
 
 The other functions raise an error unless their input is in memory:
 
@@ -114,14 +114,20 @@ The other functions raise an error unless their input is in memory:
   {func}`infercnvpy.pl.spatial_cnv`, {func}`infercnvpy.tl.pca` and the heatmaps with `mode="legacy"`,
 - the representation that {func}`infercnvpy.pp.neighbors` and {func}`infercnvpy.tl.tsne` read (`use_rep`, by default
   the PCA `adata.obsm["X_cnv_pca"]`), and the CNV matrix when they compute the PCA,
-- the expression matrix (`adata.X`, or the layer you pass) for {func}`infercnvpy.tl.ithgex`, and the raw counts for
-  {func}`infercnvpy.tl.detectability`.
+- the expression matrix (`adata.X`, or the layer you pass) for {func}`infercnvpy.tl.ithgex`, and the raw counts
+  (`adata.X`, or the layer you pass) for {func}`infercnvpy.tl.detectability`.
+
+A backed AnnData keeps `obsm` and `obsp` in memory, so the functions above work on it, except
+{func}`~infercnvpy.tl.ithgex`, {func}`~infercnvpy.tl.detectability` and {func}`~infercnvpy.tl.tsne`. On a backed
+AnnData, {func}`~infercnvpy.tl.tsne` and {func}`infercnvpy.tl.umap` fail with an error from anndata. On an AnnData
+from {func}`~anndata.experimental.read_lazy`, {func}`~infercnvpy.tl.umap`, {func}`infercnvpy.tl.leiden` and
+{func}`infercnvpy.pl.umap` fail with errors from scanpy. Load the AnnData first in these cases.
 
 {func}`~infercnvpy.tl.smooth_cnv` also returns a dense float32 matrix (cells x windows). Load the input before you call
 these functions:
 
 ```python
 adata.obsm["X_cnv"] = adata.obsm["X_cnv"].compute()  # a dask array
-adata.X = adata.X.compute()  # likewise for the expression matrix
+adata.X = adata.X.compute()  # a dask expression matrix, or the same for the layer you pass
 adata = adata.to_memory()  # an AnnData from read_lazy or a backed file
 ```

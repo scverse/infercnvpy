@@ -247,7 +247,8 @@ def test_tools_that_need_x_in_memory(oligo, tmp_path, form, layer):
         lazy = da.from_array(counts, chunks=(50, -1), asarray=False)
         a.X, a.layers["counts"] = (lazy, counts) if layer is None else (counts, lazy)
         field = "adata.X" if layer is None else f"adata.layers['{layer}']"
-        hint = f"got a dask array. Load it first with `.compute()` and store the result back in adata (e.g. `{field} = {field}.compute()`)"
+        hint = "got a dask array. Load it first with `.compute()` and store the result back in adata "
+        hint += f"(e.g. `{field} = {field}.compute()`)"
     calls = {
         "the raw counts": lambda: cnv.tl.detectability(a, groupby="cell_type", layer=layer, **REF),
         "the expression matrix": lambda: cnv.tl.ithgex(a, groupby="cell_type", layer=layer),

@@ -369,7 +369,7 @@ def test_spatial_cnv_panels(adata_spatial):
 
 
 def test_spatial_cnv_csr(adata_spatial):
-    """A CSR CNV matrix (`tl.infercnv` with `dynamic_threshold`) gives the colors of the dense one."""
+    """A CSR CNV matrix (`tl.infercnv` with `dynamic_threshold`) gives the plotted values of the dense one."""
     [dense] = cnv.pl.spatial_cnv(adata_spatial, region="chr1", show=False).collections
     adata_spatial.obsm["X_cnv"] = sp.csr_matrix(adata_spatial.obsm["X_cnv"])
     [csr] = cnv.pl.spatial_cnv(adata_spatial, region="chr1", show=False).collections
