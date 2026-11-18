@@ -1,5 +1,6 @@
 import logging
 
+import anndata as ad
 import numpy as np
 import numpy.testing as npt
 import pandas as pd
@@ -98,6 +99,30 @@ def test_genomic_position_from_gtf_duplicates(tmp_path, caplog, gtf_gene_id, n_d
     else:
         assert "more than one entry" not in msg
         assert adata.var["chromosome"].notna().all()
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_genomic_position_from_gtf_replaces_existing_columns(tmp_path, lazy):
+    """Positions already in `var`, e.g. from an earlier run, are replaced, and the other columns of `var` are kept."""
+    gtf = tmp_path / "a.gtf"
+    gtf.write_text('chr1\tTEST\tgene\t100\t199\t.\t+\t.\tgene_id "ENSG1"; gene_name "A";\n')
+    var = pd.DataFrame(
+        {"chromosome": ["chr9", "chr9"], "start": [1, 2], "end": [3, 4], "gene_name": ["x", "y"], "other": [5, 6]},
+        index=["A", "B"],
+    )
+    adata = sc.AnnData(np.zeros((2, 2), dtype=np.float32), var=var)
+    if lazy:
+        adata.write_zarr(tmp_path / "a.zarr")
+        adata = ad.experimental.read_lazy(tmp_path / "a.zarr")
+
+    res = genomic_position_from_gtf(gtf, adata, inplace=False)
+
+    assert list(res.index) == ["A", "B"]
+    assert res["chromosome"].tolist()[0] == "chr1" and pd.isna(res["chromosome"].iloc[1])
+    assert res["start"].tolist()[0] == 100
+    assert res["gene_name"].tolist() == ["x", "y"] and res["other"].tolist() == [5, 6]
+    assert res["gene_id"].tolist()[0] == "ENSG1"
+    assert not res.columns.str.endswith(("_x", "_y")).any()
 
 
 def test_genomic_position_from_biomart_duplicate_message(monkeypatch, caplog):
