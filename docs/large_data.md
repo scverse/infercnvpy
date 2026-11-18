@@ -105,9 +105,11 @@ by block:
 - {func}`infercnvpy.tl.cnv_score`.
 
 The other functions that read the CNV matrix need it in memory and raise an error otherwise:
-{func}`infercnvpy.tl.ithcna`, {func}`infercnvpy.tl.smooth_cnv`, {func}`infercnvpy.pl.spatial_cnv`, and the heatmaps with
-`mode="legacy"`. {func}`infercnvpy.tl.pca` passes the matrix to scanpy. {func}`~infercnvpy.tl.smooth_cnv` also returns
-a dense float32 matrix (cells x windows). Load the matrix before you call them:
+{func}`infercnvpy.tl.ithcna`, {func}`infercnvpy.tl.smooth_cnv`, {func}`infercnvpy.pl.spatial_cnv`,
+{func}`infercnvpy.tl.pca`, the heatmaps with `mode="legacy"`, and {func}`infercnvpy.pp.neighbors` and
+{func}`infercnvpy.tl.tsne` when they compute the PCA. {func}`~infercnvpy.tl.smooth_cnv` also returns a dense float32
+matrix (cells x windows). {func}`infercnvpy.tl.detectability` and {func}`infercnvpy.tl.ithgex` need the expression
+matrix in memory in the same way. Load the matrix before you call them:
 
 ```python
 adata.obsm["X_cnv"] = adata.obsm["X_cnv"].compute()  # a dask array

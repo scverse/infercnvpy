@@ -5,7 +5,7 @@ import scanpy as sc
 from anndata import AnnData
 
 from infercnvpy._logging import log
-from infercnvpy._util import _copy_for_inplace_false, _deprecated_positional
+from infercnvpy._util import _as_matrix, _copy_for_inplace_false, _deprecated_positional
 
 from ._copy_number import copy_number
 from ._detectability import detectability
@@ -179,7 +179,7 @@ def pca(
         raise KeyError(f"X_{use_rep} is not in adata.obsm. Did you run `tl.infercnv`?")
 
     pca_res = sc.tl.pca(
-        adata.obsm[f"X_{use_rep}"],
+        _as_matrix(adata.obsm[f"X_{use_rep}"], f"`obsm['X_{use_rep}']`"),
         svd_solver=svd_solver,
         zero_center=zero_center,
         **kwargs,
@@ -285,6 +285,8 @@ def tsne(
     if f"X_{use_rep}" not in adata.obsm and use_rep == "cnv_pca":
         pca(adata)
         log.info("tsne: computed X_cnv_pca with default parameters, as it was not in adata.obsm")
+    if f"X_{use_rep}" in adata.obsm:  # a lazy matrix raises the "load it first" error, not one from scanpy
+        _as_matrix(adata.obsm[f"X_{use_rep}"], f"`obsm['X_{use_rep}']`")
     tmp_adata = sc.tl.tsne(adata, use_rep=f"X_{use_rep}", copy=True, **kwargs)
 
     if inplace:

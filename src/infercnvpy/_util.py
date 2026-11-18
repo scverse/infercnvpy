@@ -29,10 +29,12 @@ def _as_matrix(x, what: str = "the expression matrix", *, lazy: bool = False):
         return x
     if _is_dask(x) or _is_backed(x):
         kind = "a dask array" if _is_dask(x) else "a backed (on-disk) matrix"
+        # the example names the field of adata that `what` gives in backticks, e.g. "`obsm['X_cnv']`" or "`adata.X`"
+        field = re.search(r"`(?:adata\.)?(\w+(?:\[[^\]`]+\])?)`", what)
+        example = f" (e.g. `adata.{field[1]} = adata.{field[1]}.compute()`)" if field else ""
         raise TypeError(
             f"This function needs {what} in memory, got {kind}. Load it first: call `.compute()` on a dask array "
-            "and store the result back in adata (e.g. `adata.obsm['X_cnv'] = adata.obsm['X_cnv'].compute()`), or "
-            "use `adata = adata.to_memory()` for a backed AnnData."
+            f"and store the result back in adata{example}, or use `adata = adata.to_memory()` for a backed AnnData."
         )
     kinds = "a numpy array or scipy sparse matrix in memory"
     if lazy:
@@ -63,9 +65,11 @@ def _is_backed(x) -> bool:
 
 
 def _as_df(df) -> pd.DataFrame:
-    """Narrow `obs`/`var` to a pandas DataFrame (AnnData also allows lazy `Dataset2D`)."""
+    """Narrow `obs`/`var` to a pandas DataFrame; a lazy `Dataset2D` (`anndata.experimental.read_lazy`) is loaded."""
     if isinstance(df, pd.DataFrame):
         return df
+    if hasattr(df, "to_memory"):
+        return df.to_memory()
     raise TypeError(f"infercnvpy needs `obs` and `var` as pandas DataFrames, got {type(df).__name__}.")
 
 

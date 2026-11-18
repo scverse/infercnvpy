@@ -1,6 +1,7 @@
 """infercnv on lazy and on-disk data: dask arrays (dense, or sparse blocks as in lazily loaded spatial tables) and
 backed h5ad. Adapted from the tests of scverse/infercnvpy#192 by Stephen Williams."""
 
+import re
 from contextlib import nullcontext
 
 import anndata as ad
@@ -14,6 +15,7 @@ import scipy.sparse as sp
 
 import infercnvpy as cnv
 from infercnvpy.tl._infercnv import _get_reference
+from tests.conftest import knn_graph
 
 REF = {"reference_key": "cell_type", "reference_cat": ["Microglia/Macrophage", "Oligodendrocytes (non-malignant)"]}
 
@@ -205,6 +207,10 @@ def test_tools_that_need_cnv_in_memory(oligo, dynamic_threshold):
         lambda: cnv.pl.spatial_cnv(a, region="chr1", show=False),
         lambda: cnv.pl.chromosome_heatmap(a, groupby="cell_type", mode="legacy", show=False),
         lambda: cnv.pl.chromosome_heatmap_summary(a, groupby="cell_type", mode="legacy", show=False),
+        lambda: cnv.tl.pca(a),
+        lambda: cnv.tl.tsne(a),  # through the PCA it computes
+        lambda: cnv.pp.neighbors(a),  # likewise
+        lambda: cnv.pp.neighbors(a, use_rep="cnv"),
     ]
     for call in calls:
         with pytest.raises(
@@ -214,6 +220,42 @@ def test_tools_that_need_cnv_in_memory(oligo, dynamic_threshold):
     assert cnv.tl.cnv_score(a, groupby="cell_type", inplace=False) == pytest.approx(
         cnv.tl.cnv_score(eager, groupby="cell_type", inplace=False)
     )
+
+
+def test_lazy_cnv_pca(oligo):
+    """tsne and neighbors on a lazy PCA (as `read_lazy` gives it) ask to load the PCA, not the CNV matrix."""
+    a = oligo.copy()
+    a.obsm["X_cnv_pca"] = da.from_array(np.zeros((a.n_obs, 5), dtype=np.float32), chunks=(50, -1))
+    for call in (lambda: cnv.tl.tsne(a), lambda: cnv.pp.neighbors(a)):
+        with pytest.raises(TypeError, match=re.escape("`adata.obsm['X_cnv_pca'] = adata.obsm['X_cnv_pca'].compute()`")):
+            call()
+
+
+@pytest.mark.parametrize(("form", "layer"), [("dask", None), ("dask", "counts"), ("backed", None)])
+def test_tools_that_need_x_in_memory(oligo, tmp_path, form, layer):
+    """detectability and ithgex on a lazy or backed X (a backed AnnData has its layers in memory) name the matrix
+    they need in the error."""
+    counts = sp.csr_matrix(oligo.X.shape, dtype=np.float32)
+    a = _with_X(oligo, counts)
+    if form == "backed":
+        a.write_h5ad(tmp_path / "a.h5ad")
+        a = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
+        kind = "a backed (on-disk) matrix"
+    else:
+        a.layers["counts"] = counts
+        lazy = da.from_array(counts, chunks=(50, -1), asarray=False)
+        a.X, a.layers["counts"] = (lazy, counts) if layer is None else (counts, lazy)
+        kind = "a dask array"
+    field = "adata.X" if layer is None else f"adata.layers['{layer}']"
+    calls = {
+        "the raw counts": lambda: cnv.tl.detectability(a, groupby="cell_type", layer=layer, **REF),
+        "the expression matrix": lambda: cnv.tl.ithgex(a, groupby="cell_type", layer=layer),
+    }
+    for what, call in calls.items():
+        message = f"needs {what} (`{field}`) in memory, got {kind}. Load it first: call `.compute()` on a dask array "
+        message += f"and store the result back in adata (e.g. `{field} = {field}.compute()`), or use"
+        with pytest.raises(TypeError, match=re.escape(message)):
+            call()
 
 
 def test_lazy_without_threshold(oligo, expected):
@@ -297,6 +339,49 @@ def test_read_lazy_downstream(oligo, tmp_path):
     ith = cnv.tl.ithcna(b, groupby="cell_type", inplace=False)
     assert list(lazy_ith) == list(ith)
     np.testing.assert_array_equal(list(lazy_ith.values()), list(ith.values()))
+
+
+def test_read_lazy_spatial(oligo, tmp_path):
+    """The spatial tools read the lazy graph, `obs` and colors of `read_lazy`; smooth_cnv needs `X_cnv` in memory."""
+    b = oligo.copy()
+    cnv.tl.infercnv(b, **REF)
+    b.obs["cell_type"] = b.obs["cell_type"].astype("category")
+    b.uns["cell_type_colors"] = np.array(["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"])[
+        : len(b.obs["cell_type"].cat.categories)
+    ]
+    b.obsm["spatial"] = np.random.default_rng(0).random((b.n_obs, 2))
+    b.obsp["spatial_connectivities"] = knn_graph(b.obsm["spatial"])
+    b.write_zarr(tmp_path / "cnv.zarr")
+    a = ad.experimental.read_lazy(tmp_path / "cnv.zarr")
+    assert isinstance(a.obsp["spatial_connectivities"], da.Array)
+    pd.testing.assert_series_equal(
+        cnv.tl.spatial_regions(a, key="cell_type", inplace=False),
+        cnv.tl.spatial_regions(b, key="cell_type", inplace=False),
+    )
+    with pytest.raises(TypeError, match=r"needs `obsm\['X_cnv'\]` in memory"):
+        cnv.tl.smooth_cnv(a)
+    a.obsm["X_cnv"] = a.obsm["X_cnv"].compute()
+    cnv.tl.smooth_cnv(a, **REF)
+    cnv.tl.smooth_cnv(b, **REF)
+    np.testing.assert_array_equal(a.obsm["X_cnv_smoothed"], b.obsm["X_cnv_smoothed"])
+    [[lazy, _], [eager, _]] = (
+        [ax.collections[0] for ax in cnv.pl.spatial_cnv(x, region="chr1", color="cell_type", show=False)]
+        for x in (a, b)
+    )
+    np.testing.assert_array_equal(lazy.get_array(), eager.get_array())
+
+
+def test_read_lazy_gtf(testdata, tmp_path):
+    """`io.genomic_position_from_gtf` loads the lazy `var` of `read_lazy`."""
+    gtf = testdata / "chr21_gencode.gtf"
+    genes = cnv.io.genomic_position_from_gtf(gtf)["gene_name"]
+    b = ad.AnnData(obs=pd.DataFrame(index=["c0", "c1"]), var=pd.DataFrame(index=[*genes[:20], "not_in_gtf"]))
+    b.write_zarr(tmp_path / "genes.zarr")
+    a = ad.experimental.read_lazy(tmp_path / "genes.zarr")
+    assert not isinstance(a.var, pd.DataFrame)
+    pd.testing.assert_frame_equal(
+        cnv.io.genomic_position_from_gtf(gtf, a, inplace=False), cnv.io.genomic_position_from_gtf(gtf, b, inplace=False)
+    )
 
 
 def test_unplaced_and_extra_features(oligo, expected):
