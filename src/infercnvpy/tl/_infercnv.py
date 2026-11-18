@@ -70,7 +70,8 @@ def infercnv(
         `chunksize`. The CNV matrix and the gene values are float32.
 
     .. versionchanged:: 0.7.0
-        The CNV matrix can be a dense array instead of a CSR matrix, with the same values, see Returns.
+        With `dynamic_threshold=None`, the CNV matrix is a dense array instead of a CSR matrix,
+        with the same values.
 
     .. versionadded:: 0.7.0
         `min_mean`, to leave out lowly expressed genes as the `cutoff` of R inferCNV does.
@@ -164,13 +165,11 @@ def infercnv(
     `adata.obsm["X_{key_added}"]` : :class:`scipy.sparse.csr_matrix` or :class:`numpy.ndarray`
         Smoothed and denoised CNV values (float32), cells x genomic windows, ordered by
         chromosome and genomic position. Values inside the noise band of `dynamic_threshold`
-        are 0. The matrix is a :class:`numpy.ndarray` when an array needs less memory than a CSR
-        matrix, and a CSR matrix otherwise, with the same values either way. A CSR matrix stores
-        each non-zero value with its int32 column index (8 bytes), and an array stores every value
-        (4 bytes). So the matrix is an array when more than about half of its values are
-        non-zero, and always with `dynamic_threshold=None`. Code that needs one of the two can
-        check with :func:`scipy.sparse.issparse`. With `lazy`, a :class:`dask.array.Array` of
-        CSR blocks without this size check, or of dense blocks with `dynamic_threshold=None`.
+        are 0. With `dynamic_threshold=None`, the noise filter sets no value to 0 and the matrix is a
+        :class:`numpy.ndarray`. With a threshold, it is a CSR matrix. A CSR matrix stores each
+        non-zero value with its column index, so with a low threshold, where most values are
+        non-zero, it can need more memory than an array would. With `lazy`, it is a
+        :class:`dask.array.Array` of blocks of the same type.
     `adata.uns[key_added]["chr_pos"]` : :class:`dict`
         Maps each chromosome to the column of `X_{key_added}` where it starts.
     `adata.uns[key_added]["window_start"]`, `adata.uns[key_added]["window_end"]` : :class:`numpy.ndarray`
@@ -465,9 +464,6 @@ _READ_AHEAD = {"dask": 4, "backed": 2}
 #: `(threshold, centre)` that removes nothing
 _NO_BAND = (-1.0, 0.0)
 
-#: values per block of rows when a CSR result is turned into a dense array
-_DENSE_BLOCK = 1 << 24
-
 
 def _noise_band(plan: _Plan, rowstats: np.ndarray) -> tuple[float, float]:
     """`(threshold, centre)` of the noise band from the per-cell (sum, sum of squares) of the windows."""
@@ -518,34 +514,13 @@ class _CsrBuilder:
         _fill_kept(windows, *band, indptr, self.data, self.indices)
         self.n = r1
 
-    def finish(self) -> sp.csr_matrix | np.ndarray:
-        """The CSR matrix, or a dense array if that is smaller."""
+    def finish(self) -> sp.csr_matrix:
         nnz = int(self.indptr[-1])
         self.data.resize(nnz, refcheck=False)
         self.indices.resize(nnz, refcheck=False)
         idx_dtype = np.int32 if max(nnz, self.shape[1]) < np.iinfo(np.int32).max else np.int64
-        n_rows, n_cols = self.shape
-        idx_size = np.dtype(idx_dtype).itemsize
-        if n_rows * n_cols * self.data.itemsize < nnz * (self.data.itemsize + idx_size) + (n_rows + 1) * idx_size:
-            return self._to_dense()
         indices = self.indices.astype(idx_dtype, copy=False)
         return sp.csr_matrix((self.data, indices, self.indptr.astype(idx_dtype)), shape=self.shape, copy=False)
-
-    def _to_dense(self) -> np.ndarray:
-        """The rows as a dense array, filled from the last block of rows on while the CSR arrays shrink behind it."""
-        out = np.zeros(self.shape, dtype=np.float32)  # the operating system maps the pages as they are written
-        step = max(1, _DENSE_BLOCK // max(self.shape[1], 1))
-        for r1 in range(self.shape[0], 0, -step):
-            r0 = max(r1 - step, 0)
-            s, e = int(self.indptr[r0]), int(self.indptr[r1])
-            block = sp.csr_matrix(
-                (self.data[s:e], self.indices[s:e], self.indptr[r0 : r1 + 1] - s), shape=(r1 - r0, self.shape[1])
-            )
-            block.toarray(out=out[r0:r1])
-            del block
-            self.data.resize(s, refcheck=False)
-            self.indices.resize(s, refcheck=False)
-        return out
 
 
 def _to_csr(windows: np.ndarray, counts: np.ndarray, band: tuple[float, float]) -> sp.csr_matrix:
@@ -581,7 +556,7 @@ def _run(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_values
     else:
         band = None if plan.dynamic_threshold is not None else _NO_BAND
     shape = (source.n_obs, plan.layout.n_windows)
-    # without a threshold every value is kept, and a dense array is smaller than a CSR matrix
+    # without a threshold every value is kept, so a dense array needs at most half the memory of a CSR matrix
     res = np.empty(shape, dtype=np.float32) if plan.dynamic_threshold is None else _CsrBuilder(*shape)
     gv = np.full((source.n_obs, plan.layout.n_vars), np.nan, dtype=np.float32) if gene_values else None
     r0 = 0

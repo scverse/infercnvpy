@@ -36,8 +36,8 @@ float32 values for the block being processed (and, for lazy data, the blocks tha
 
 By default, the next blocks are read in background threads (with the synchronous scheduler for a dask array) while
 the current block is processed with `n_jobs` threads on the main thread. The result, `adata.obsm["X_cnv"]`, is in
-memory. It is a CSR matrix with 8 bytes for each value that the noise filter keeps, or a dense array with 4 bytes for
-every value, whichever needs less memory (see {func}`infercnvpy.tl.infercnv`).
+memory. With `dynamic_threshold=None`, it is a dense array with 4 bytes for every value. Otherwise it is a CSR matrix
+with 8 bytes (12 above 2^31 values) for each value that the noise filter keeps (`adata.obsm["X_cnv"].nnz` values).
 
 With `lazy=True`, the result for a dask array stays a dask array of CSR blocks (dense blocks with
 `dynamic_threshold=None`), computed with

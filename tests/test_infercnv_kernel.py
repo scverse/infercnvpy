@@ -195,32 +195,17 @@ def test_noise_reference(oligo):
 
 
 @pytest.mark.parametrize("fmt", [np.asarray, sp.csr_matrix])
-@pytest.mark.parametrize(("dynamic_threshold", "dense"), [(None, True), (1.5, False), (0.3, True)])
-def test_x_cnv_is_stored_in_the_smaller_format(oligo, monkeypatch, fmt, dynamic_threshold, dense):
-    """X_cnv is a dense array when that needs less memory than CSR, with the values of the CSR matrix."""
-    monkeypatch.setattr(cnv.tl._infercnv, "_DENSE_BLOCK", 1000)  # a CSR matrix becomes an array in many blocks
-    csr = []
-    to_dense = cnv.tl._infercnv._CsrBuilder._to_dense
-
-    def keep_csr(builder):
-        csr.append(sp.csr_matrix((builder.data.copy(), builder.indices.copy(), builder.indptr), shape=builder.shape))
-        return to_dense(builder)
-
-    monkeypatch.setattr(cnv.tl._infercnv._CsrBuilder, "_to_dense", keep_csr)
+def test_x_cnv_is_dense_without_threshold(oligo, fmt):
+    """X_cnv is a dense array with `dynamic_threshold=None` and a CSR matrix with a threshold, also a low one."""
     adata = oligo.copy()
     adata.X = fmt(oligo.X.toarray())
-    res = _run(adata, dynamic_threshold=dynamic_threshold, chunksize=50)[1]
-    assert isinstance(res, np.ndarray if dense else sp.csr_matrix)
-    assert res.dtype == np.float32
-    if dynamic_threshold is None:  # nothing is removed, so the array is built directly
-        assert not csr
-        assert np.count_nonzero(res) > res.size / 2
-    elif dense:
-        fill = csr[0].nnz / res.size
-        assert fill > 1 / 2
-        assert res.tobytes() == csr[0].toarray().tobytes()
-    else:
-        assert res.nnz < res.shape[0] * res.shape[1] / 2
+    dense = _run(adata, dynamic_threshold=None, chunksize=50)[1]
+    assert isinstance(dense, np.ndarray)
+    assert dense.dtype == np.float32
+    for threshold in (1.5, 0.3, 0.0):
+        assert isinstance(_run(adata, dynamic_threshold=threshold, chunksize=50)[1], sp.csr_matrix)
+    # a threshold of 0 keeps every non-zero value: the same values as the array, also the sign of zeros
+    assert dense.tobytes() == _run(adata, dynamic_threshold=0.0, chunksize=50)[1].toarray().tobytes()
 
 
 def test_n_jobs(oligo):
