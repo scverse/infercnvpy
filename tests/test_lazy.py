@@ -356,6 +356,7 @@ def test_read_lazy_spatial(oligo, tmp_path):
     pd.testing.assert_series_equal(
         cnv.tl.spatial_regions(a, key="cell_type", inplace=False),
         cnv.tl.spatial_regions(b, key="cell_type", inplace=False),
+        check_names=False,  # older anndata's read_lazy drops the index name
     )
     for call in (lambda: cnv.tl.smooth_cnv(a), lambda: cnv.pl.spatial_cnv(a, region="chr1", show=False)):
         with pytest.raises(TypeError, match=r"needs `obsm\['X_cnv'\]` in memory"):
