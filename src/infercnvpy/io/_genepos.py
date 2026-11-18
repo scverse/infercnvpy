@@ -11,13 +11,15 @@ from infercnvpy._logging import log_result
 from infercnvpy._util import _as_df, _splice_doc
 
 _MERGE_RULES = """\
-When adata is given, the annotation replaces the `chromosome`, `start` and `end` columns that
-`adata.var` already has, and existing positions are not kept as a fallback. Genes without an
-entry in the annotation get missing positions, and so do genes whose id has more than one entry.
-The log reports the number of such genes, and `adata.var["chromosome"].isna().sum()` counts
-them after the call (with `inplace=False`, the same on the returned data frame).
-:func:`infercnvpy.tl.infercnv` skips genes without a position. For any other column name, an
-existing `adata.var` column wins over an annotation column of the same name.
+When adata is given, the gene positions from the annotation (the BioMart table or the GTF file)
+replace the `chromosome`, `start` and `end` columns that `adata.var` already has. For any other
+column name, an existing `adata.var` column wins over an annotation column of the same name.
+Existing positions are not kept as a fallback. Genes without an entry in the annotation get NaN
+positions, and so do genes whose id appears more than once in the annotation.
+`adata.var["chromosome"].isna().sum()` counts these genes after the call, or count them on the
+returned data frame with `inplace=False`. The log also reports the number of affected gene ids,
+as a warning when half or more are affected and at info level otherwise.
+:func:`infercnvpy.tl.infercnv` skips genes without a position.
 """
 
 
@@ -40,9 +42,10 @@ def genomic_position_from_biomart(
     ----------
     adata
         Adds the genomic positions to `adata.var`. If adata is None, returns
-        a data frame with the genomic positions instead.
+        a data frame with the genomic positions instead, without the genes whose id
+        appears more than once in the annotation.
     adata_gene_id
-        Column in `adata.var` that contains (ENSMBL) gene IDs. If not specified,
+        Column in `adata.var` that contains (Ensembl) gene IDs. If not specified,
         use `adata.var_names`.
     biomart_gene_id
         The biomart column to use as gene identifier. Typically this would be `ensembl_gene_id` or `hgnc_symbol`,
@@ -120,9 +123,10 @@ def genomic_position_from_gtf(
         Path to the GTF file
     adata
         Adds the genomic positions to `adata.var`. If adata is None, returns
-        a data frame with the genomic positions instead.
+        a data frame with the genomic positions instead, without the genes whose id
+        appears more than once in the annotation.
     gtf_gene_id
-        Use this GTF column to match it to anndata
+        Use this GTF column to match it to adata
     adata_gene_id
         Match this column to the gene ids from the GTF file. Default: use
         adata.var_names.

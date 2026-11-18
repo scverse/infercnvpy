@@ -141,7 +141,8 @@ def test_genomic_position_from_gtf_replaces_existing_columns(tmp_path, lazy, inp
 
 
 @pytest.mark.parametrize("inplace", [True, False])
-def test_genomic_position_from_biomart_replaces_existing_columns(monkeypatch, tmp_path, inplace):
+@pytest.mark.parametrize("lazy", [False, True])
+def test_genomic_position_from_biomart_replaces_existing_columns(monkeypatch, tmp_path, lazy, inplace):
     """The BioMart reader shares the rules: positions are replaced, a duplicated id gets none."""
     annot = pd.DataFrame(
         {
@@ -152,13 +153,16 @@ def test_genomic_position_from_biomart_replaces_existing_columns(monkeypatch, tm
         }
     )
     monkeypatch.setattr(scanpy.queries, "biomart_annotations", lambda *args, **kwargs: annot.copy())
-    var = pd.DataFrame({"chromosome": ["chr9", "chr9"], "start": [1, 2], "end": [3, 4]}, index=["ENSG1", "ENSG2"])
+    var = pd.DataFrame(
+        {"chromosome": ["chr9", "chr9"], "start": [1, 2], "end": [3, 4], "other": [5, 6]}, index=["ENSG1", "ENSG2"]
+    )
     adata = sc.AnnData(np.zeros((2, 2), dtype=np.float32), var=var)
 
-    res = _annotated_var(genomic_position_from_biomart, adata, tmp_path, False, inplace)
+    res = _annotated_var(genomic_position_from_biomart, adata, tmp_path, lazy, inplace)
 
     assert res["chromosome"].tolist()[0] == "chr1" and res["chromosome"].isna().tolist() == [False, True]
     assert res["start"].tolist()[0] == 10
+    assert res["other"].tolist() == [5, 6]
     assert not res.columns.str.endswith(("_x", "_y")).any()
 
 
