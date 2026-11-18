@@ -21,7 +21,7 @@ from anndata import AnnData
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import njit, njit_parallel, numba_threads, prange
-from infercnvpy._util import _as_list, _as_matrix, _listed, _obs_column, _params_for_uns
+from infercnvpy._util import _as_matrix, _listed, _obs_column, _params_for_uns, _reference_cells
 
 
 @njit
@@ -136,21 +136,6 @@ def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
     return G
 
 
-def _reference_cells(adata: AnnData, key: str, cats: str | Sequence[str]) -> np.ndarray:
-    """Boolean mask of the cells with `adata.obs[key]` in `cats` (`NaN` is not a reference cell)."""
-    if key not in adata.obs.columns:
-        raise KeyError(f"`adata.obs[{key!r}]` not found.")
-    labels = _obs_column(adata, key)
-    present = pd.Index(labels.dropna().unique())
-    missing = [c for c in _as_list(cats) if c not in present]
-    if missing:
-        raise ValueError(
-            f"`reference_cat` values not found in `adata.obs[{key!r}]`: {missing}. "
-            f"Valid values: {sorted(map(str, present))}."
-        )
-    return labels.isin(_as_list(cats)).to_numpy()
-
-
 def smooth_cnv(
     adata: AnnData,
     *,
@@ -198,15 +183,23 @@ def smooth_cnv(
     weight means a closer neighbor). Distances, e.g. `obsp["spatial_distances"]`, give the
     farthest neighbors the largest weight and are rejected.
 
-    A normal cell next to a tumor cell shares no copy number change with it, so an edge between them carries no
-    information. Smoothing over such edges dilutes the tumor cells at the tumor edge and moves tumor signal into the
-    normal cells there. With `reference_key` and `reference_cat` (e.g. the reference cells of
-    :func:`infercnvpy.tl.infercnv`), the edges between the reference cells and the other cells are dropped before
-    smoothing. The edges within each group stay, so that the reference cells are smoothed as much as the other cells
-    and a threshold set on them still fits. The mask has two groups and not one per cell type, so that tumor cells
-    annotated as different types still share edges. It cannot separate normal and tumor cells of the same type. The
-    mask also does not remove tumor signal that a normal cell carries in its own counts, e.g. from spillover or from a
-    segmentation that merged it with a tumor cell.
+    A normal cell next to a tumor cell shares no copy number change with it, so smoothing over
+    the edge between them dilutes the tumor cell and moves tumor signal into the normal cell.
+    With `reference_key` and `reference_cat`, usually the same as in
+    :func:`infercnvpy.tl.infercnv`, the edges between the reference cells and the other cells
+    are dropped before smoothing. The edges within each of the two groups stay, so that
+    reference cells away from the tumor are smoothed like the other cells. Cells at the border
+    keep fewer neighbors, so their own profile weighs more. Cells left without neighbors keep
+    their unsmoothed values. The mask has two groups and not one per cell type, so that tumor
+    cells annotated as different types still share edges.
+
+    The mask is only as good as the reference labels. Normal cells outside `reference_cat`
+    (e.g. normal epithelium next to a carcinoma, or cells with `NaN`) still share edges with
+    the tumor, and a tumor cell labeled as a reference type is smoothed with the reference
+    cells. The mask also does not remove tumor signal that a normal cell carries in its own
+    counts, e.g. from spillover or from a segmentation that merged it with a tumor cell. For a
+    threshold on the smoothed values, take reference cells far from the tumor rather than all
+    reference cells, because those at the border can carry such signal.
 
     Parameters
     ----------
@@ -222,16 +215,18 @@ def smooth_cnv(
         The result is stored in `adata.obsm["X_{key_added}"]` and `adata.uns[key_added]`.
     alpha
         Weight of the cell itself, between 0 and 1. Default: the cell counts as one more
-        neighbor, i.e. `1 / (n_neighbors + 1)`; with binary connectivities this is the plain
-        mean over the cell and its neighbors.
+        neighbor, i.e. `1 / (n_neighbors + 1)`, counting the neighbors left after the
+        reference mask; with binary connectivities this is the plain mean over the cell and its
+        neighbors.
     n_hops
         Number of smoothing steps.
     reference_key
-        Column of `adata.obs` that marks the reference cells, together with `reference_cat`. Default: smooth over
-        the full graph.
+        Column of `adata.obs` that annotates the normal (reference) cells. Give it together with
+        `reference_cat` to drop the edges between the reference cells and the other cells.
+        Default: smooth over the full graph.
     reference_cat
-        One or more values of `adata.obs[reference_key]` that mark the reference cells. Cells with another value or
-        `NaN` form the other group.
+        One value or a list of values of `adata.obs[reference_key]` that mark the reference
+        cells. Cells with any other value or `NaN` form the other group.
     inplace
         If `True`, store the result in adata, otherwise return it.
     n_jobs
@@ -258,14 +253,12 @@ def smooth_cnv(
     if n_hops < 1:
         raise ValueError(f"`n_hops` must be at least 1, got {n_hops}.")
     reference_cat = _listed(reference_cat)
-    if (reference_key is None) != (reference_cat is None):
-        raise ValueError("Give both `reference_key` and `reference_cat`, or neither.")
+    ref = _reference_cells(adata, reference_key, reference_cat)
     G = _graph(adata, connectivity_key)
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`obsm['X_{use_rep}']`")
     if G.shape != (X.shape[0], X.shape[0]):
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` has shape {G.shape}, expected {(X.shape[0],) * 2}.")
-    if reference_key is not None and reference_cat is not None:
-        ref = _reference_cells(adata, reference_key, reference_cat)
+    if ref is not None:
         G.data *= (
             ref[np.repeat(np.arange(G.shape[0]), np.diff(G.indptr))] == ref[G.indices]
         )  # keep edges within a group

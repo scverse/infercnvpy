@@ -178,9 +178,9 @@ def test_smooth_cnv_reference_mask_errors(graph_and_cnv):
         cnv.tl.smooth_cnv(adata, reference_key="status")
     with pytest.raises(ValueError, match="both `reference_key` and `reference_cat`"):
         cnv.tl.smooth_cnv(adata, reference_cat="tumor")
-    with pytest.raises(KeyError, match="'cell_type'"):
+    with pytest.raises(KeyError, match="`cell_type` is not a column"):
         cnv.tl.smooth_cnv(adata, reference_key="cell_type", reference_cat="tumor")
-    with pytest.raises(ValueError, match=r"\['normal'\].*Valid values: \['non-tumor', 'tumor'\]"):
+    with pytest.raises(ValueError, match=r"in \['normal'\]\. The column has \['non-tumor', 'tumor'\]"):
         cnv.tl.smooth_cnv(adata, reference_key="status", reference_cat=["tumor", "normal"])
     assert "X_cnv_smoothed" not in adata.obsm
 

@@ -31,7 +31,7 @@ from tqdm.auto import tqdm
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_list, _as_matrix, _check_counts, _listed, _params_for_uns
+from infercnvpy._util import _as_list, _as_matrix, _check_counts, _listed, _params_for_uns, _reference_cells
 from infercnvpy.tl import _copy_number_kernels as K
 from infercnvpy.tl._infercnv import NO_CHR_NAMES, _check_var, _natural_sort, _on_used_chromosomes, _Rows
 from infercnvpy.tl._infercnv_kernels import _group_sums_csr
@@ -743,21 +743,6 @@ def _check_args(*, n_clusters, max_fit_cells, min_detection, segment_length, **a
         raise ValueError(f"`min_detection` must be between 0 and 1, got {min_detection}.")
     if segment_length <= 0:
         raise ValueError(f"`segment_length` must be positive, got {segment_length}.")
-
-
-def _reference_cells(adata, reference_key, reference_cat) -> np.ndarray | None:
-    """Which cells are reference (normal) cells, or `None` without a reference; checks the arguments."""
-    if (reference_key is None) != (reference_cat is None):
-        raise ValueError("Give both `reference_key` and `reference_cat` for reference cells, or neither.")
-    if reference_key is None:
-        return None
-    if reference_key not in adata.obs.columns:
-        raise KeyError(f"`{reference_key}` is not a column of `adata.obs`.")
-    values = np.asarray(adata.obs[reference_key])
-    missing = [c for c in _as_list(reference_cat) if c not in set(values)]
-    if missing:
-        raise ValueError(f"No cell has `{reference_key}` in {missing!r}.")
-    return np.isin(values, _as_list(reference_cat))
 
 
 def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
