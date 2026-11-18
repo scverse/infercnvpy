@@ -189,9 +189,9 @@ def smooth_cnv(
     weight means a closer neighbor). Distances, e.g. `obsp["spatial_distances"]`, give the
     farthest neighbors the largest weight and are rejected.
 
-    A normal cell next to a tumor cell shares no copy number change with it, so smoothing over
-    the edge between them dilutes the tumor cell and moves tumor signal into the normal cell.
-    With `reference_key` and `reference_cat`, usually the same as in
+    A correctly annotated normal cell next to a tumor cell shares no copy number change with
+    it, so smoothing over the edge between them dilutes the tumor cell and moves tumor signal
+    into the normal cell. With `reference_key` and `reference_cat`, usually the same as in
     :func:`infercnvpy.tl.infercnv`, the edges between the reference cells and the other cells
     are dropped before smoothing. The edges within each of the two groups stay, so that
     reference cells away from the tumor are smoothed like the other cells. Cells at the border
@@ -206,7 +206,11 @@ def smooth_cnv(
     counts, e.g. from spillover or from a segmentation that merged it with a tumor cell. For a
     threshold on the smoothed values, take reference cells far from the tumor (e.g. more than a
     few cell diameters from any cell outside the reference) rather than all reference cells,
-    because those at the border can carry such signal.
+    because those at the border can carry such signal. Even with the mask, more of the normal
+    cells at the border can pass such a threshold after smoothing than without smoothing,
+    because averaging them with their normal neighbors cuts the noise around the signal in
+    their own counts. A call at the border therefore needs evidence per cell beyond the CNV
+    profile, e.g. marker genes or morphology.
 
     Parameters
     ----------
