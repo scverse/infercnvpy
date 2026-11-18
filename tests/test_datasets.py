@@ -26,6 +26,17 @@ def test_maynard2020_3k(tmp_path, monkeypatch):
     assert (tmp_path / "maynard2020_3k.h5ad").is_file()
 
 
+@pytest.mark.internet
+def test_wu2026_atera_breast(tmp_path, monkeypatch):
+    monkeypatch.setenv(DATASET_ENV_VAR, str(tmp_path))
+    adata = cnv.datasets.wu2026_atera_breast()
+    assert adata.shape == tuple(_DATASETS["wu2026_atera_breast"].metadata["shape"])
+    assert (tmp_path / "wu2026_atera_breast.h5ad").is_file()
+    assert {"chromosome", "start", "end"} <= set(adata.var.columns)
+    assert {"cell_type", "wgs_clone_group"} <= set(adata.obs.columns)
+    assert "CC BY 4.0" in adata.uns["source"]["dataset"]["attribution"]
+
+
 def test_fetch_leaves_scanpy_datasetdir_alone(tmp_path, monkeypatch):
     """A file named like a dataset in scanpy's `datasetdir` is the user's: it is neither used nor overwritten."""
     import pooch
