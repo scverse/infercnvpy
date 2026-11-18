@@ -35,6 +35,7 @@ def test_wu2026_atera_breast(tmp_path, monkeypatch):
     assert {"chromosome", "start", "end"} <= set(adata.var.columns)
     assert {"cell_type", "wgs_clone_group"} <= set(adata.obs.columns)
     assert "CC BY 4.0" in adata.uns["source"]["dataset"]["attribution"]
+    assert {"clone_group", "arm", "log2"} <= set(adata.uns["wgs_truth"]["arms"].columns)
 
 
 def test_fetch_leaves_scanpy_datasetdir_alone(tmp_path, monkeypatch):
