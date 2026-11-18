@@ -322,8 +322,9 @@ def copy_number(
         this mixture is part of the diploid expectation, so that spillover alone does not make them aneuploid.
     `adata.obs["copy_number_stability"]` : :class:`float`
         Share of the `n_restarts` fits whose call for the cell (aneuploid or diploid, without the spatial prior)
-        equals its label, in steps of `1 / n_restarts`. 1 means that every fit makes the same call, and lower
-        values mark cells whose call depends on the k-means seed.
+        equals its label, in steps of `1 / n_restarts`. 1 means that every fit makes the same call. Lower values
+        mark cells whose call depends on the k-means seed or, with `connectivity_key`, whose label the spatial
+        prior changed against the fits.
     `adata.obsm["X_copy_number"]` : :class:`numpy.ndarray`
         Copy number log ratios (natural log, float32), cells x genomic bins: the posterior mixture of the clones'
         segment means, a continuous score. Cells that are `"not.defined"` or `"undetermined"` have 0 (no copy number
