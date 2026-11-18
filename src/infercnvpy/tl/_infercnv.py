@@ -164,9 +164,9 @@ def infercnv(
     `adata.obsm["X_{key_added}"]` : :class:`scipy.sparse.csr_matrix` or :class:`numpy.ndarray`
         Smoothed and denoised CNV values (float32), cells x genomic windows, ordered by
         chromosome and genomic position. Values inside the noise band of `dynamic_threshold`
-        are 0. The matrix is a :class:`numpy.ndarray` when that needs less memory than a CSR
+        are 0. The matrix is a :class:`numpy.ndarray` when an array needs less memory than a CSR
         matrix, and a CSR matrix otherwise, with the same values either way. A CSR matrix stores
-        each non-zero value with its column index (8 bytes), and an array stores every value
+        each non-zero value with its int32 column index (8 bytes), and an array stores every value
         (4 bytes). So the matrix is an array when more than about half of its values are
         non-zero, and always with `dynamic_threshold=None`. Code that needs one of the two can
         check with :func:`scipy.sparse.issparse`. With `lazy`, a :class:`dask.array.Array` of
