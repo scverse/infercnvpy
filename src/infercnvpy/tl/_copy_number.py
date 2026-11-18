@@ -35,7 +35,7 @@ from infercnvpy._util import _as_list, _as_matrix, _check_counts, _listed, _para
 from infercnvpy.tl import _copy_number_kernels as K
 from infercnvpy.tl._infercnv import NO_CHR_NAMES, _check_var, _natural_sort, _on_used_chromosomes, _Rows
 from infercnvpy.tl._infercnv_kernels import _group_sums_csr
-from infercnvpy.tl._spatial import _graph
+from infercnvpy.tl._spatial import _drop_cross_edges, _graph
 
 #: Cell-cycle genes of Tirosh et al. 2016 (S and G2/M phase), with the current symbols of renamed genes added.
 CELL_CYCLE_GENES = (
@@ -761,8 +761,7 @@ def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
     n, k = lt.shape
     G = G[cells][:, cells].tocsr()
     if ref is not None:
-        rows = np.repeat(np.arange(n), np.diff(G.indptr))
-        G.data = G.data * (ref[rows] == ref[G.indices])
+        _drop_cross_edges(G, ref)
     G.eliminate_zeros()
     lik = np.exp(lt - lt.max(axis=1, keepdims=True))
     base = np.exp(log_prior)

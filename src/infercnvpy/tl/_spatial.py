@@ -136,6 +136,12 @@ def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
     return G
 
 
+def _drop_cross_edges(G: sp.csr_matrix, ref: np.ndarray) -> None:
+    """Drop, in place, the edges of `G` between the cells where `ref` is True and the other cells."""
+    G.data *= ref[np.repeat(np.arange(G.shape[0]), np.diff(G.indptr))] == ref[G.indices]
+    G.eliminate_zeros()
+
+
 def smooth_cnv(
     adata: AnnData,
     *,
@@ -189,17 +195,18 @@ def smooth_cnv(
     :func:`infercnvpy.tl.infercnv`, the edges between the reference cells and the other cells
     are dropped before smoothing. The edges within each of the two groups stay, so that
     reference cells away from the tumor are smoothed like the other cells. Cells at the border
-    keep fewer neighbors, so their own profile weighs more. Cells left without neighbors keep
-    their unsmoothed values. The mask has two groups and not one per cell type, so that tumor
-    cells annotated as different types still share edges.
+    keep fewer neighbors, so with the default `alpha` their own profile weighs more. Cells left
+    without neighbors keep their unsmoothed values. The mask has two groups and not one per
+    cell type, so that tumor cells annotated as different types still share edges.
 
     The mask is only as good as the reference labels. Normal cells outside `reference_cat`
     (e.g. normal epithelium next to a carcinoma, or cells with `NaN`) still share edges with
     the tumor, and a tumor cell labeled as a reference type is smoothed with the reference
     cells. The mask also does not remove tumor signal that a normal cell carries in its own
     counts, e.g. from spillover or from a segmentation that merged it with a tumor cell. For a
-    threshold on the smoothed values, take reference cells far from the tumor rather than all
-    reference cells, because those at the border can carry such signal.
+    threshold on the smoothed values, take reference cells far from the tumor (e.g. more than a
+    few cell diameters from any cell outside the reference) rather than all reference cells,
+    because those at the border can carry such signal.
 
     Parameters
     ----------
@@ -259,10 +266,7 @@ def smooth_cnv(
     if G.shape != (X.shape[0], X.shape[0]):
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` has shape {G.shape}, expected {(X.shape[0],) * 2}.")
     if ref is not None:
-        G.data *= (
-            ref[np.repeat(np.arange(G.shape[0]), np.diff(G.indptr))] == ref[G.indices]
-        )  # keep edges within a group
-        G.eliminate_zeros()
+        _drop_cross_edges(G, ref)
 
     start = log.debug("smooth_cnv: %d cells x %d windows, %d hops", X.shape[0], X.shape[1], n_hops)
     graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), -1.0 if alpha is None else float(alpha))
