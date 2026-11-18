@@ -27,14 +27,18 @@ def _as_matrix(x, what: str = "the expression matrix", *, lazy: bool = False):
         return x.astype(np.float32) if x.dtype == np.float16 else x
     if sp.issparse(x) or (lazy and _is_backed(x)):
         return x
-    if _is_dask(x) or _is_backed(x):
-        kind = "a dask array" if _is_dask(x) else "a backed (on-disk) matrix"
+    if _is_backed(x):
+        raise TypeError(
+            f"This function needs {what} in memory, got a backed (on-disk) matrix. Load the AnnData first with "
+            "`adata = adata.to_memory()`."
+        )
+    if _is_dask(x):
         # the example names the field of adata that `what` gives in backticks, e.g. "`obsm['X_cnv']`" or "`adata.X`"
         field = re.search(r"`(?:adata\.)?(\w+(?:\[[^\]`]+\])?)`", what)
         example = f" (e.g. `adata.{field[1]} = adata.{field[1]}.compute()`)" if field else ""
         raise TypeError(
-            f"This function needs {what} in memory, got {kind}. Load it first: call `.compute()` on a dask array "
-            f"and store the result back in adata{example}, or use `adata = adata.to_memory()` for a backed AnnData."
+            f"This function needs {what} in memory, got a dask array. Load it first with `.compute()` and store the "
+            f"result back in adata{example}, or load the whole AnnData with `adata = adata.to_memory()`."
         )
     kinds = "a numpy array or scipy sparse matrix in memory"
     if lazy:

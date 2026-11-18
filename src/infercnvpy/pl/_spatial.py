@@ -92,7 +92,8 @@ def spatial_cnv(
         for r in regions:
             obs[f"{use_rep} {r}"] = np.asarray(X[:, _region_columns(adata, use_rep, r)].mean(axis=1)).ravel()
     # `read_lazy` gives the colors in `uns` (e.g. `uns["cell_type_colors"]`) as dask arrays, which scanpy can't read
-    tmp = AnnData(obs=obs, uns={k: v.compute() if _is_dask(v) else v for k, v in adata.uns.items()})
+    uns = {k: v.compute() if _is_dask(v) and k.endswith("_colors") else v for k, v in adata.uns.items()}
+    tmp = AnnData(obs=obs, uns=uns)
     tmp.obsm[basis] = np.asarray(adata.obsm[basis])
     kwargs.setdefault("vcenter", [0] * len(regions) + [None] * len(colors))
     show, save, return_fig = (kwargs.pop(k, None) for k in ("show", "save", "return_fig"))

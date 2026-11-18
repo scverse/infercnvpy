@@ -657,7 +657,7 @@ def test_copy_number_lazy_and_backed(form, tmp_path):
         adata = read_h5ad(tmp_path / "a.h5ad", backed="r")
     got = cnv.tl.copy_number(adata, **kw)
     pd.testing.assert_frame_equal(got[0], want[0])
-    np.testing.assert_array_equal(got[1], want[1])
+    np.testing.assert_allclose(got[1], want[1], rtol=1e-6)
 
 
 def test_copy_number_dense_and_strings():

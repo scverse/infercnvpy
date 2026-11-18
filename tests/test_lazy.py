@@ -240,21 +240,20 @@ def test_tools_that_need_x_in_memory(oligo, tmp_path, form, layer):
     if form == "backed":
         a.write_h5ad(tmp_path / "a.h5ad")
         a = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
-        kind = "a backed (on-disk) matrix"
+        field = "adata.X"
+        hint = "got a backed (on-disk) matrix. Load the AnnData first with `adata = adata.to_memory()`."
     else:
         a.layers["counts"] = counts
         lazy = da.from_array(counts, chunks=(50, -1), asarray=False)
         a.X, a.layers["counts"] = (lazy, counts) if layer is None else (counts, lazy)
-        kind = "a dask array"
-    field = "adata.X" if layer is None else f"adata.layers['{layer}']"
+        field = "adata.X" if layer is None else f"adata.layers['{layer}']"
+        hint = f"got a dask array. Load it first with `.compute()` and store the result back in adata (e.g. `{field} = {field}.compute()`)"
     calls = {
         "the raw counts": lambda: cnv.tl.detectability(a, groupby="cell_type", layer=layer, **REF),
         "the expression matrix": lambda: cnv.tl.ithgex(a, groupby="cell_type", layer=layer),
     }
     for what, call in calls.items():
-        message = f"needs {what} (`{field}`) in memory, got {kind}. Load it first: call `.compute()` on a dask array "
-        message += f"and store the result back in adata (e.g. `{field} = {field}.compute()`), or use"
-        with pytest.raises(TypeError, match=re.escape(message)):
+        with pytest.raises(TypeError, match=re.escape(f"needs {what} (`{field}`) in memory, {hint}")):
             call()
 
 
@@ -346,9 +345,8 @@ def test_read_lazy_spatial(oligo, tmp_path):
     b = oligo.copy()
     cnv.tl.infercnv(b, **REF)
     b.obs["cell_type"] = b.obs["cell_type"].astype("category")
-    b.uns["cell_type_colors"] = np.array(["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"])[
-        : len(b.obs["cell_type"].cat.categories)
-    ]
+    # colors that scanpy's default palette doesn't have, so the plot below shows that it read them
+    b.uns["cell_type_colors"] = np.array([f"#{16 * i:02x}0000" for i in range(len(b.obs["cell_type"].cat.categories))])
     b.obsm["spatial"] = np.random.default_rng(0).random((b.n_obs, 2))
     b.obsp["spatial_connectivities"] = knn_graph(b.obsm["spatial"])
     b.write_zarr(tmp_path / "cnv.zarr")
@@ -358,17 +356,20 @@ def test_read_lazy_spatial(oligo, tmp_path):
         cnv.tl.spatial_regions(a, key="cell_type", inplace=False),
         cnv.tl.spatial_regions(b, key="cell_type", inplace=False),
     )
-    with pytest.raises(TypeError, match=r"needs `obsm\['X_cnv'\]` in memory"):
-        cnv.tl.smooth_cnv(a)
+    for call in (lambda: cnv.tl.smooth_cnv(a), lambda: cnv.pl.spatial_cnv(a, region="chr1", show=False)):
+        with pytest.raises(TypeError, match=r"needs `obsm\['X_cnv'\]` in memory"):
+            call()
     a.obsm["X_cnv"] = a.obsm["X_cnv"].compute()
     cnv.tl.smooth_cnv(a, **REF)
     cnv.tl.smooth_cnv(b, **REF)
     np.testing.assert_array_equal(a.obsm["X_cnv_smoothed"], b.obsm["X_cnv_smoothed"])
-    [[lazy, _], [eager, _]] = (
+    [[lazy, lazy_types], [eager, eager_types]] = (
         [ax.collections[0] for ax in cnv.pl.spatial_cnv(x, region="chr1", color="cell_type", show=False)]
         for x in (a, b)
     )
     np.testing.assert_array_equal(lazy.get_array(), eager.get_array())
+    np.testing.assert_array_equal(lazy_types.get_facecolors(), eager_types.get_facecolors())
+    assert (lazy_types.get_facecolors()[:, 1:3] == 0).all()  # the colors of `uns`, which have no green or blue
 
 
 def test_read_lazy_gtf(testdata, tmp_path):
