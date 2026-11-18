@@ -174,14 +174,14 @@ def smooth_cnv(
     share the same copy number state, and averaging over them recovers the signal. Related
     methods average before the CNV inference instead. InSituCNV :cite:`Jensen2025` smooths the
     normalized expression over a kNN graph of expression similarity and then runs infercnvpy,
-    and SlideCNA :cite:`Zhang2025` pools the expression of neighboring beads. Han et al. :cite:`Han2026` found that aggregating cells on a grid improved CNV recovery
-    on imaging platforms at native resolution. Smoothing also blurs the boundary between tumor
-    and normal tissue by about `n_hops` cells.
+    and SlideCNA :cite:`Zhang2025` pools the expression of neighboring beads. Han et al.
+    :cite:`Han2026` found that aggregating cells on a grid improved CNV recovery on imaging
+    platforms compared to native single-cell resolution. Smoothing also blurs the boundary
+    between tumor and normal tissue by about `n_hops` cells.
 
     By default, :func:`infercnvpy.tl.infercnv` sets the values in its noise band to 0, and
-    this function averages those zeros. In our own simulation of imaging data, which is not
-    published, smoothing the unfiltered matrix of `tl.infercnv(..., dynamic_threshold=None)` recovered the CNV profiles better and
-    separated tumor from normal cells better than smoothing the filtered one.
+    this function averages those zeros together with the values outside the band. To smooth the
+    unfiltered values, run `tl.infercnv(..., dynamic_threshold=None)`.
 
     The graph usually comes from :func:`squidpy.gr.spatial_neighbors_knn`, e.g.
     `sq.gr.spatial_neighbors_knn(adata, n_neighs=10)`, or from
