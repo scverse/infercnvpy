@@ -5,7 +5,7 @@ intermediate files that are not public:
 
 `--source`
     The 10x Atera preview section of FFPE breast cancer as one h5ad (spatialdata-db entry jCLxdY1tWKmbfWOB0001),
-    with the vendor segmentation counts in `layers["counts"]`, gene positions in `var`, cell centroids in
+    holding only the cells with a cell type (the "cells with an annotation only" in `uns["source"]`), with the vendor segmentation counts in `layers["counts"]`, gene positions in `var`, cell centroids in
     `obsm["spatial"]` (µm), and the columns `cell_type` (expression clustering) and `pred_state` (epithelial states
     transferred by logistic regression from the annotated demo cells of Wu et al. 2026) in `obs`.
 `--raw`
@@ -20,8 +20,9 @@ intermediate files that are not public:
     log2 clipped to [-2, 2], and the length-weighted mean of the segments per arm. The centered table subtracts the
     mean of the runs of regions 1 and 2.
 
-The arm table and the labels added here are derived data by the infercnvpy authors, licensed under CC BY 4.0, from
-Wu et al. 2026 and SRA PRJNA1509685. The 10x data are licensed under CC BY 4.0.
+The 10x data are licensed under CC BY 4.0. The arm table and the labels added here are by the infercnvpy authors, also
+under CC BY 4.0. The arm table comes from the WGS reads of SRA PRJNA1509685, and the region labels from outlines
+traced from a figure of Wu et al. 2026.
 
 Usage::
 

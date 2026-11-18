@@ -103,8 +103,9 @@ def wu2026_atera_breast() -> AnnData:
     Analysis (development version), 10x Genomics (2026, June 2)",
     https://www.10xgenomics.com/datasets/atera-wta-ffpe-human-breast-cancer, licensed under CC BY 4.0
     (https://creativecommons.org/licenses/by/4.0/). The subset, the cell labels, the region labels and the arm table
-    are changes and derived data by the infercnvpy authors, also licensed under CC BY 4.0, from :cite:`Wu2026` and
-    SRA PRJNA1509685. When you use the data, cite 10x Genomics as above and :cite:`Wu2026`.
+    are changes by the infercnvpy authors, also licensed under CC BY 4.0. The arm table comes from the WGS reads of SRA
+    PRJNA1509685, and the region labels from outlines traced from a figure of :cite:`Wu2026`. When you use the data,
+    cite 10x Genomics as above and :cite:`Wu2026`.
 
     {pooch_info}
     """

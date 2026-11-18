@@ -43,6 +43,8 @@ def test_wu2026_atera_breast(tmp_path, monkeypatch):
     assert set(adata.obsm) == {"spatial"}
     assert set(adata.uns) == {"source", "wgs_truth", "window_um"}
     assert {"arms", "arms_by_wgs_run", "description"} <= set(adata.uns["wgs_truth"])
+    assert {"attribution", "tissue", "preview_notice"} <= set(adata.uns["source"]["dataset"])
+    assert {"Normal Luminal", "Normal Basal", "Ductal Luminal"} <= set(adata.obs["pred_state"].cat.categories)
     arms = adata.uns["wgs_truth"]["arms"]
     dtypes = {
         "clone_group": is_string_dtype, "arm": is_string_dtype, "kind": is_string_dtype, "log2": is_float_dtype,
@@ -52,6 +54,7 @@ def test_wu2026_atera_breast(tmp_path, monkeypatch):
     assert list(arms.columns) == list(dtypes)
     for column, check in dtypes.items():
         assert check(arms[column]), column
+    assert set(arms["kind"]) <= {"arm", "focal"}
 
 
 def test_fetch_leaves_scanpy_datasetdir_alone(tmp_path, monkeypatch):
