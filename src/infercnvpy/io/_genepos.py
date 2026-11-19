@@ -36,7 +36,9 @@ def genomic_position_from_biomart(
     """
     Get genomic gene positions from ENSEMBL Biomart.
 
-    Needs the optional dependency pybiomart, which `pip install "infercnvpy[biomart]"` installs.
+    Needs the optional dependency pybiomart. Install it with `pip install "infercnvpy[biomart]"` or
+    `conda install -c bioconda pybiomart`, or read the gene positions from a GTF file with
+    :func:`~infercnvpy.io.genomic_position_from_gtf` instead.
 
     {merge_rules}
 
