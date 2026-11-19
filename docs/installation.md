@@ -55,8 +55,10 @@ uv add git+https://github.com/scverse/infercnvpy.git
 
 ## Optional dependencies
 
-- `infercnvpy[biomart]` installs [pybiomart][] for {func}`infercnvpy.io.genomic_position_from_biomart`.
-  pybiomart is on bioconda but not on conda-forge, so infercnvpy does not require it.
+- `infercnvpy[biomart]` installs [pybiomart][] for {func}`infercnvpy.io.genomic_position_from_biomart`, which queries
+  Ensembl BioMart over the internet.
+  With conda, install pybiomart from bioconda (`conda install -c bioconda pybiomart`).
+  You don't need it if you read the gene positions from a GTF file with {func}`infercnvpy.io.genomic_position_from_gtf`.
 - `infercnvpy[dask]` installs dask and the lazy readers of anndata (`anndata[dask,lazy]`) for {doc}`large and lazy datasets <large_data>`.
 - `infercnvpy[gtf]` installs [gtfparse][] for {func}`infercnvpy.io.genomic_position_from_gtf`.
 - `infercnvpy[scevan]` installs [rdata][] for {func}`infercnvpy.io.read_scevan`.

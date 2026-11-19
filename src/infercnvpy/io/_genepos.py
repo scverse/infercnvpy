@@ -62,8 +62,9 @@ def genomic_position_from_biomart(
         import pybiomart  # noqa: F401  # scanpy.queries imports it only when it queries
     except ImportError:
         raise ImportError(
-            "genomic_position_from_biomart needs the optional dependency pybiomart. "
-            'Install it with `pip install "infercnvpy[biomart]"`.'
+            "genomic_position_from_biomart needs the optional dependency pybiomart. Install it with "
+            '`pip install "infercnvpy[biomart]"` or `conda install -c bioconda pybiomart`, or read the gene positions '
+            "from a GTF file with `genomic_position_from_gtf`."
         ) from None
     biomart_annot = (
         scanpy.queries.biomart_annotations(
