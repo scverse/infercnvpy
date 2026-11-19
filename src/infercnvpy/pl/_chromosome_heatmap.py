@@ -60,11 +60,11 @@ _HEATMAP_DOC = {
             Key under which the result from :func:`infercnvpy.tl.infercnv` are stored. With `mode="fast"`,
             `adata.obsm[f"X_{use_rep}"]` can also be a dask array or a backed matrix, which is read block by block.
         chromosomes
-            Plot only these chromosomes, in the given order rather than in genome order, e.g. `["chr1", "chr7"]` or
-            a single name. The names are the chromosome labels of the full plot (the keys of
-            `adata.uns[use_rep]["chr_pos"]`), e.g. `"chr1"` or `"1"` depending on the gene annotation. `None` plots
-            all chromosomes. By default, the limits of the color scale come from these chromosomes only, so the same
-            value can get a different color than in the full plot. Pass `vmin` and `vmax` to compare plots.
+            Plot only these chromosomes, in the given order rather than in genome order, e.g. `["chr1", "chr7"]` or a
+            single name. The names are the chromosome labels of the plot of all chromosomes (the keys of
+            `adata.uns[use_rep]["chr_pos"]`), e.g. `"chr1"` or `"1"` depending on the gene annotation. `None` plots all
+            chromosomes. By default, the limits of the color scale come from these chromosomes only, so the same value
+            can get a different color than in the plot of all chromosomes. Pass `vmin` and `vmax` to compare plots.
             `standard_scale="obs"` also scales over these chromosomes only. With `dendrogram=True`, the groups are
             clustered on these chromosomes, and the dendrogram is not stored in `adata.uns`.
         cmap
@@ -152,8 +152,8 @@ def chromosome_heatmap(
         `vmin` and `vmax` to compare figures across modes, representations or datasets. `dendrogram=True` orders the
         groups as :func:`scanpy.tl.dendrogram` with its defaults clusters them (as `mode="legacy"`; with more windows
         than `scanpy.settings.N_PCS`, it clusters the groups' means of a PCA of all cells) and draws the dendrogram
-        next to the heatmap. A dendrogram stored in `adata.uns[f"dendrogram_{groupby}"]` is used if it has the same
-        groups; otherwise the computed one is stored there, as `mode="legacy"` does.
+        next to the heatmap. Unless `chromosomes` is given, a dendrogram stored in `adata.uns[f"dendrogram_{groupby}"]`
+        is used if it has the same groups. Otherwise, the computed one is stored there, as `mode="legacy"` does.
 
     {returns}
     """
