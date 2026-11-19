@@ -36,6 +36,8 @@ def genomic_position_from_biomart(
     """
     Get genomic gene positions from ENSEMBL Biomart.
 
+    Needs the optional dependency pybiomart, which `pip install "infercnvpy[biomart]"` installs.
+
     {merge_rules}
 
     Parameters
@@ -56,6 +58,13 @@ def genomic_position_from_biomart(
     **kwargs
         passed on to :func:`scanpy.queries.biomart_annotations`
     """
+    try:
+        import pybiomart  # noqa: F401  # scanpy.queries imports it only when it queries
+    except ImportError:
+        raise ImportError(
+            "genomic_position_from_biomart needs the optional dependency pybiomart. "
+            'Install it with `pip install "infercnvpy[biomart]"`.'
+        ) from None
     biomart_annot = (
         scanpy.queries.biomart_annotations(
             species,
