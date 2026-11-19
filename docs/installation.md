@@ -59,7 +59,8 @@ uv add git+https://github.com/scverse/infercnvpy.git
 - `infercnvpy[gtf]` installs [gtfparse][] for {func}`infercnvpy.io.genomic_position_from_gtf`.
 - `infercnvpy[scevan]` installs [rdata][] for {func}`infercnvpy.io.read_scevan`.
 - `infercnvpy[spatial]` installs [squidpy][] for the spatial neighbor graph that {func}`infercnvpy.tl.spatial_regions`,
-  {func}`infercnvpy.pl.spatial_cnv` and the `connectivity_key` of {func}`infercnvpy.tl.copy_number` read from `adata.obsp`.
+  {func}`infercnvpy.pl.spatial_cnv` and the `connectivity_key` of {func}`infercnvpy.tl.copy_number` read from
+  `adata.obsp`.
   The functions themselves work with any graph in `adata.obsp`, so squidpy is only needed to build it.
 
 To work on infercnvpy itself, see {doc}`contributing`.
