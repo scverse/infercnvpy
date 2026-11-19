@@ -22,13 +22,13 @@ from mpl_toolkits.axes_grid1.axes_size import Fixed
 
 from infercnvpy._logging import SKIP_OWN_FRAMES
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column, _splice_doc
+from infercnvpy._util import _as_df, _as_list, _as_matrix, _is_backed, _is_dask, _obs_column, _splice_doc
 from infercnvpy.pl._chromosome_heatmap_legacy import legacy_heatmap, legacy_summary, two_slope_norm
 from infercnvpy.pl._heatmap_kernels import ColumnRanges, Gram, binned_sums, pixel_rows, sampled_rows
 from infercnvpy.tl._copy_number import _top_eigenvectors
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from matplotlib.axes import Axes
     from matplotlib.backend_bases import RendererBase
@@ -59,6 +59,11 @@ _HEATMAP_DOC = {
         use_rep
             Key under which the result from :func:`infercnvpy.tl.infercnv` are stored. With `mode="fast"`,
             `adata.obsm[f"X_{use_rep}"]` can also be a dask array or a backed matrix, which is read block by block.
+        chromosomes
+            Plot only these chromosomes, in the given order, e.g. `["chr1", "chr7"]`. The names are the keys of
+            `adata.uns[use_rep]["chr_pos"]`. The color scale comes from the windows of these chromosomes only. With
+            `dendrogram=True`, a dendrogram stored in `adata.uns` is still used, and a dendrogram computed from these
+            windows is not stored.
         cmap
             colormap to use
         figsize
@@ -101,6 +106,7 @@ def chromosome_heatmap(
     *,
     groupby: str = "cnv_leiden",
     use_rep: str = "cnv",
+    chromosomes: Sequence[str] | None = None,
     cmap: str | Colormap = "bwr",
     figsize: tuple[float, float] = (16, 10),
     mode: Literal["fast", "legacy"] = "fast",
@@ -150,6 +156,7 @@ def chromosome_heatmap(
     """
     if aggregate not in ("sample", "mean"):
         raise ValueError(f"`aggregate` must be 'sample' or 'mean', got {aggregate!r}.")
+    adata = _select_chromosomes(adata, use_rep, chromosomes)
     if _use_legacy("chromosome_heatmap", adata, groupby, use_rep, mode, kwargs):
         return _legacy(legacy_heatmap, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
     opts = _Options.pop(kwargs)
@@ -187,6 +194,7 @@ def chromosome_heatmap_summary(
     *,
     groupby: str = "cnv_leiden",
     use_rep: str = "cnv",
+    chromosomes: Sequence[str] | None = None,
     cmap: str | Colormap = "bwr",
     figsize: tuple[float, float] = (16, 10),
     mode: Literal["fast", "legacy"] = "fast",
@@ -219,6 +227,7 @@ def chromosome_heatmap_summary(
 
     {returns}
     """
+    adata = _select_chromosomes(adata, use_rep, chromosomes)
     if _use_legacy("chromosome_heatmap_summary", adata, groupby, use_rep, mode, kwargs):
         return _legacy(legacy_summary, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
     opts = _Options.pop(kwargs)
@@ -367,6 +376,29 @@ def _legacy(
 
 
 # --- data -----------------------------------------------------------------------------------------------------------
+
+
+def _select_chromosomes(adata: AnnData, use_rep: str, chromosomes: Sequence[str] | None) -> AnnData:
+    """`adata` with only the windows of `chromosomes`, in this order, in `obsm[f"X_{use_rep}"]` and `chr_pos`.
+
+    The new AnnData has the `obs` and a shallow copy of the `uns` of `adata`, so the plot stores nothing in `adata`.
+    """
+    if chromosomes is None:
+        return adata
+    chromosomes = _as_list(chromosomes)
+    chr_pos = dict(sorted(adata.uns[use_rep]["chr_pos"].items(), key=lambda x: x[1]))
+    if missing := [c for c in chromosomes if c not in chr_pos]:
+        raise ValueError(f"{missing} not in `adata.uns[{use_rep!r}]['chr_pos']`, which has {list(chr_pos)}.")
+    if not chromosomes or len(set(chromosomes)) < len(chromosomes):
+        raise ValueError(f"`chromosomes` must name at least one chromosome, each once, got {chromosomes}.")
+    key = f"X_{use_rep}"
+    X = _as_matrix(adata.obsm[key], f"`adata.obsm['{key}']`", lazy=True)
+    ends = dict(zip(chr_pos, [*list(chr_pos.values())[1:], X.shape[1]], strict=True))
+    X = X[:, np.concatenate([np.arange(chr_pos[c], ends[c]) for c in chromosomes])]  # a dask array stays lazy
+    sizes = [ends[c] - chr_pos[c] for c in chromosomes]
+    pos = dict(zip(chromosomes, np.cumsum([0, *sizes[:-1]]).tolist(), strict=True))
+    uns = {**adata.uns, use_rep: {**adata.uns[use_rep], "chr_pos": pos}}
+    return AnnData(obs=_as_df(adata.obs), obsm={key: X}, uns=uns)
 
 
 def _figure(ax: Axes | None, figsize: tuple[float, float]) -> tuple[Figure, Axes]:
