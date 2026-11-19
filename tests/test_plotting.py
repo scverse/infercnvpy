@@ -429,6 +429,9 @@ def test_chromosomes_plot_like_a_subset(adata_small, fmt, mode, dendrogram, plot
         uns={"cnv": {"chr_pos": {"chr3": 0, "chr1": 3}}, "group_colors": adata_small.uns["group_colors"]},
     )
     kwargs = {"groupby": "group", "mode": mode, "dendrogram": dendrogram, "show": False}
+    if dendrogram:
+        plot(adata_small, **kwargs)  # stores the dendrogram of all chromosomes, which the subset must not use
+    stored = adata_small.uns.get("dendrogram_group")
     actual = plot(adata_small, chromosomes=["chr3", "chr1"], **kwargs)
     expected = plot(subset, **kwargs)
     np.testing.assert_allclose(_image(actual), _image(expected), rtol=1e-6)
@@ -436,7 +439,7 @@ def test_chromosomes_plot_like_a_subset(adata_small, fmt, mode, dendrogram, plot
     assert [t.get_text() for t in actual["groupby_ax"].get_yticklabels()] == [
         t.get_text() for t in expected["groupby_ax"].get_yticklabels()
     ]
-    assert "dendrogram_group" not in adata_small.uns  # computed for the subset, so not stored
+    assert adata_small.uns.get("dendrogram_group") is stored  # the subset's dendrogram is not stored
     assert isinstance(adata_small.obsm["X_cnv"], type(fmt(X)))
 
 

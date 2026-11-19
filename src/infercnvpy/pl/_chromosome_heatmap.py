@@ -60,10 +60,13 @@ _HEATMAP_DOC = {
             Key under which the result from :func:`infercnvpy.tl.infercnv` are stored. With `mode="fast"`,
             `adata.obsm[f"X_{use_rep}"]` can also be a dask array or a backed matrix, which is read block by block.
         chromosomes
-            Plot only these chromosomes, in the given order, e.g. `["chr1", "chr7"]`. The names are the keys of
-            `adata.uns[use_rep]["chr_pos"]`. The color scale comes from the windows of these chromosomes only. With
-            `dendrogram=True`, a dendrogram stored in `adata.uns` is still used, and a dendrogram computed from these
-            windows is not stored.
+            Plot only these chromosomes, in the given order rather than in genome order, e.g. `["chr1", "chr7"]` or
+            a single name. The names are the chromosome labels of the full plot (the keys of
+            `adata.uns[use_rep]["chr_pos"]`), e.g. `"chr1"` or `"1"` depending on the gene annotation. `None` plots
+            all chromosomes. By default, the limits of the color scale come from these chromosomes only, so the same
+            value can get a different color than in the full plot. Pass `vmin` and `vmax` to compare plots.
+            `standard_scale="obs"` also scales over these chromosomes only. With `dendrogram=True`, the groups are
+            clustered on these chromosomes, and the dendrogram is not stored in `adata.uns`.
         cmap
             colormap to use
         figsize
@@ -381,7 +384,8 @@ def _legacy(
 def _select_chromosomes(adata: AnnData, use_rep: str, chromosomes: Sequence[str] | None) -> AnnData:
     """`adata` with only the windows of `chromosomes`, in this order, in `obsm[f"X_{use_rep}"]` and `chr_pos`.
 
-    The new AnnData has the `obs` and a shallow copy of the `uns` of `adata`, so the plot stores nothing in `adata`.
+    The new AnnData has the `obs` and a shallow copy of the `uns` of `adata` without stored dendrograms, so the plot
+    clusters the groups on these windows and stores nothing in `adata`. (`obsm` of a backed AnnData is in memory.)
     """
     if chromosomes is None:
         return adata
@@ -397,7 +401,8 @@ def _select_chromosomes(adata: AnnData, use_rep: str, chromosomes: Sequence[str]
     X = X[:, np.concatenate([np.arange(chr_pos[c], ends[c]) for c in chromosomes])]  # a dask array stays lazy
     sizes = [ends[c] - chr_pos[c] for c in chromosomes]
     pos = dict(zip(chromosomes, np.cumsum([0, *sizes[:-1]]).tolist(), strict=True))
-    uns = {**adata.uns, use_rep: {**adata.uns[use_rep], "chr_pos": pos}}
+    uns = {k: v for k, v in adata.uns.items() if not k.startswith("dendrogram_")}
+    uns[use_rep] = {**adata.uns[use_rep], "chr_pos": pos}
     return AnnData(obs=_as_df(adata.obs), obsm={key: X}, uns=uns)
 
 
