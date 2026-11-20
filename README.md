@@ -12,11 +12,12 @@
 
 infercnvpy is a Python library to infer copy number variation (CNV) from single-cell and spatial transcriptomics
 data.
-It averages the expression of neighboring genes along the genome and compares it with normal reference cells, so the
-result is an expression signal that follows copy number, not a measurement of DNA.
-[`tl.infercnv`][link-infercnv] follows the method of R [inferCNV][] with a few changes, which the
-[method page][link-method] lists, and it can process datasets larger than memory in blocks of cells.
-It works on the AnnData objects of the [scverse ecosystem][].
+[`tl.infercnv`][link-infercnv] averages the expression of neighboring genes along the genome and compares it with
+normal reference cells, or with the mean of all cells if no reference is given.
+The result is an expression signal that follows copy number, not a measurement of DNA.
+`tl.infercnv` follows the method of R [inferCNV][] with a few changes, which the [method page][link-method] lists.
+It can process datasets larger than memory in blocks of cells.
+infercnvpy works on the AnnData objects of the [scverse ecosystem][].
 [`tl.copy_number`][link-copy-number] is a separate count model for raw UMI counts.
 It estimates the copy number profiles of clones (groups of cells with the same profile), and it labels each cell as
 likely aneuploid (tumor) or diploid (normal).
@@ -26,8 +27,9 @@ likely aneuploid (tumor) or diploid (normal).
 
 ![Heatmap of the CNV of each cell along the chromosomes](https://raw.githubusercontent.com/scverse/infercnvpy/main/img/infercnv_heatmap.png)
 
-The results look similar, but not identical, to those of R inferCNV.
+The results of `tl.infercnv` look similar, but not identical, to those of R inferCNV.
 With small gene panels, as in imaging-based spatial data, only large changes can be detected.
+[`tl.detectability`][link-detectability] estimates which changes a given panel can detect.
 We are happy about feedback and contributions.
 
 ## Getting started
@@ -75,6 +77,7 @@ See the [citation page][link-citation] of the documentation.
 [link-api]: https://infercnvpy.readthedocs.io/en/stable/api.html
 [link-infercnv]: https://infercnvpy.readthedocs.io/en/stable/generated/infercnvpy.tl.infercnv.html
 [link-method]: https://infercnvpy.readthedocs.io/en/stable/infercnv.html
+[link-detectability]: https://infercnvpy.readthedocs.io/en/stable/generated/infercnvpy.tl.detectability.html
 [link-copy-number]: https://infercnvpy.readthedocs.io/en/stable/generated/infercnvpy.tl.copy_number.html
 [link-installation]: https://infercnvpy.readthedocs.io/en/stable/installation.html
 [link-quickstart]: https://infercnvpy.readthedocs.io/en/stable/quickstart.html

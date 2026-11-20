@@ -126,8 +126,8 @@ The `.venv` directory is typically automatically discovered by IDEs such as VS C
 ::::{tab-item} Pip
 :sync: pip
 
-Pip is nowadays mostly superseded by environment manager such as [hatch][].
-However, for the sake of completeness, and since it’s ubiquitously available,
+Pip is nowadays mostly superseded by environment managers such as [hatch][].
+However, for the sake of completeness, and since it's ubiquitously available,
 we describe how you can manage environments manually using `pip`:
 
 ```bash
