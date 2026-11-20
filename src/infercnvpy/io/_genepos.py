@@ -40,6 +40,10 @@ def genomic_position_from_biomart(
     `conda install -c bioconda pybiomart`, or read the gene positions from a GTF file with
     :func:`~infercnvpy.io.genomic_position_from_gtf` instead.
 
+    BioMart returns the gene positions of the current Ensembl release, which for human is on the GRCh38 assembly. For
+    data aligned to another assembly, such as GRCh37, use :func:`~infercnvpy.io.genomic_position_from_gtf` with the
+    GTF file of the alignment reference, or pass the `host` of an Ensembl archive (e.g. `host="grch37.ensembl.org"`).
+
     {merge_rules}
 
     Parameters
